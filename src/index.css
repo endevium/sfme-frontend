@@ -1,0 +1,22 @@
+/* src/index.css */
+@import "tailwindcss";
+
+:root {
+  --up-dark-blue: #102a43;   /* Deep background blue */
+  --up-gold: #fbbf24;        /* Golden yellow for highlights */
+  --up-teal: #244e59;        /* Teal gradient/accent */
+  --white: #ffffff;
+}
+
+body {
+  margin: 0;
+  font-family: 'Optima-Medium', 'Optima', 'Candara', 'Segoe UI', sans-serif; /* A clean font similar to your design */
+  /* Use a page-neutral background to avoid thin seam lines showing through
+     (matches Tailwind's bg-slate-50 used in page containers) */
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+.grecaptcha-badge {
+  z-index: 20000 !important; /* higher than your modal z-[9999] */
+}

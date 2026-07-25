@@ -3,7 +3,7 @@ import Navbar from '../components/Navbar';
 import Footer from '../components/Footer';
 import SafeImg from '../components/SafeImg';
 import LoginModal from '../components/LoginModal';
-
+// a
 // Assets
 import studentCutout from '../assets/students-cutout.png';
 import heroTextPng from '../assets/hero-text.png';

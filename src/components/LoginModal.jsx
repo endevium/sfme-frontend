@@ -10,7 +10,6 @@ import { saveTokens, saveToken, saveUser, getToken } from '../utils/auth';
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
 const RECAPTCHA_SITE_KEY = import.meta.env.VITE_RECAPTCHA_SITE_KEY;
 console.log("RECAPTCHA_SITE_KEY:", RECAPTCHA_SITE_KEY);
-console.log("All env:", import.meta.env);
 // reCAPTCHA reference enabled (site key loaded from env)
 
 const LoginModal = ({ isOpen, onClose }) => {

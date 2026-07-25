@@ -32,15 +32,17 @@ jobs:
                const coredemo = require('@actions/core')
                return await coredemo.getIDToken()
            result-encoding: string
-      - name: Build And Deploy
-        id: builddeploy
-        uses: Azure/static-web-apps-deploy@v1
+      - name: Debug Variables
         run: |
           echo "API=[$VITE_API_BASE_URL]"
           echo "KEY=[$VITE_RECAPTCHA_SITE_KEY]"
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
           VITE_RECAPTCHA_SITE_KEY: ${{ vars.VITE_RECAPTCHA_SITE_KEY }}
+
+      - name: Build And Deploy
+        id: builddeploy
+        uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_ICY_GROUND_0AC05AC00 }}
           action: "upload"

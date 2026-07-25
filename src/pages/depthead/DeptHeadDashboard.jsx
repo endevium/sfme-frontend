@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Sidebar from '../../components/Sidebar';
+import { getToken, clearSession } from '../../utils/auth';
 import { 
   Users, 
   GraduationCap, 
@@ -12,6 +13,64 @@ import {
   ArrowUpRight
 } from 'lucide-react';
 
+const isFacultyEvaluationQuestion = (questionIdRaw) => {
+  const questionId = String(questionIdRaw || '').toLowerCase().trim();
+  return (
+    questionId === 'overall_instructor' ||
+    questionId === 'overall_rating' ||
+    questionId === 'overall_recommend' ||
+    questionId.startsWith('inst_') ||
+    questionId.startsWith('content_') ||
+    questionId.startsWith('assess_') ||
+    questionId.startsWith('env_') ||
+    questionId.startsWith('comp_') ||
+    questionId.startsWith('method_') ||
+    questionId.startsWith('engage_') ||
+    questionId.startsWith('feedback_') ||
+    questionId.startsWith('prof_')
+  );
+};
+
+const isModuleEvaluationQuestion = (questionIdRaw) => {
+  const questionId = String(questionIdRaw || '').toLowerCase().trim();
+  return questionId.startsWith('learn_') || questionId === 'overall_modules';
+};
+
+const getQuestionScale = (questionIdRaw) => {
+  const questionId = String(questionIdRaw || '').toLowerCase().trim();
+  if (questionId.startsWith('learn_')) {
+    return { min: 1, max: 4 };
+  }
+  if (questionId === 'overall_instructor' || questionId === 'overall_modules') {
+    return { min: 1, max: 10 };
+  }
+  return { min: 1, max: 5 };
+};
+
+const toNormalizedFivePointRating = (rawRating, questionIdRaw) => {
+  const r = Number(rawRating);
+  if (isNaN(r)) return null;
+  const scale = getQuestionScale(questionIdRaw);
+  if (r < scale.min || r > scale.max) return null;
+  const normalized = 1 + ((r - scale.min) * 4) / (scale.max - scale.min);
+  return normalized;
+};
+
+const getQuestionIdFromResponseItem = (item) => (
+  item?.question || item?.question_code || item?.question_id
+);
+
+const extractList = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.results)) return payload.results;
+  if (payload && Array.isArray(payload.data)) return payload.data;
+  return [];
+};
+
+const clampFivePoint = (n) => {
+  return Math.min(5, Math.max(1, Number(n)));
+};
+
 const DeptHeadDashboard = () => {
   const handleNavigation = (path) => {
     window.history.pushState({}, '', path);
@@ -20,7 +79,7 @@ const DeptHeadDashboard = () => {
 
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
 
-  const [deptHeadInfo, setDeptHeadInfo] = useState({
+  const [deptHeadInfo, _setDeptHeadInfo] = useState({
     name: '',
     position: 'Department Head',
     department: '',
@@ -36,45 +95,150 @@ const DeptHeadDashboard = () => {
 
   const [recentEvaluations, setRecentEvaluations] = useState([]);
   const [topRatedFaculty, setTopRatedFaculty] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [loadError, setLoadError] = useState('');
-
-  const getToken = () => sessionStorage.getItem('authToken') || localStorage.getItem('authToken');
+  const [_isLoading, setIsLoading] = useState(false);
+  const [_loadError, setLoadError] = useState('');
 
   useEffect(() => {
+    const token = getToken();
+
+    // NEW: block access when logged out
+    if (!token) {
+      window.history.replaceState({}, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+      return;
+    }
+
+    const authHeaders = { Authorization: `Bearer ${token}` };
+
     const fetchDashboard = async () => {
       setIsLoading(true);
       setLoadError('');
       try {
-        // Fetch students count
-        const studentsResp = await fetch(`${API_BASE_URL}/students/`);
+        // Fetch students count (NOW protected)
+        const studentsResp = await fetch(`${API_BASE_URL}/students/`, { headers: authHeaders });
+        if (studentsResp.status === 401) throw new Error('unauthorized');
         const studentsData = await studentsResp.json().catch(() => []);
-        const totalStudents = Array.isArray(studentsData) ? studentsData.length : (studentsData?.count || 0);
+        const totalStudents = Array.isArray(studentsData)
+          ? studentsData.length
+          : (studentsData?.count || extractList(studentsData).length || 0);
 
-        // Fetch faculty count
-        const facultyResp = await fetch(`${API_BASE_URL}/faculty/`);
+        // Fetch faculty count (NOW protected)
+        const facultyResp = await fetch(`${API_BASE_URL}/faculty/`, { headers: authHeaders });
+        if (facultyResp.status === 401) throw new Error('unauthorized');
         const facultyData = await facultyResp.json().catch(() => []);
-        const totalFaculty = Array.isArray(facultyData) ? facultyData.length : (facultyData?.count || 0);
+        const totalFaculty = Array.isArray(facultyData)
+          ? facultyData.length
+          : (facultyData?.count || extractList(facultyData).length || 0);
 
-        // Fetch module evaluation forms
-        const formsResp = await fetch(`${API_BASE_URL}/module-evaluation-forms/`);
+        // Fetch module evaluation forms (NOW protected)
+        const formsResp = await fetch(`${API_BASE_URL}/module-evaluation-forms/`, { headers: authHeaders });
+        if (formsResp.status === 401) throw new Error('unauthorized');
         const formsData = await formsResp.json().catch(() => []);
-        const totalModules = Array.isArray(formsData) ? formsData.length : (formsData?.count || 0);
+        const formsList = extractList(formsData);
+        const totalModules = formsList.length;
+        const formsById = new Map(formsList.map((form) => [String(form.id), form]));
 
-        // Fetch feedback submissions (requires dept head token)
-        const token = getToken();
+        // Fetch feedback submissions (already protected; keep it consistent)
         let submissions = [];
-        if (token) {
-          const subsResp = await fetch(`${API_BASE_URL}/feedback/submissions/`, { headers: { Authorization: `Bearer ${token}` } });
-          if (subsResp.ok) {
-            submissions = await subsResp.json().catch(() => []);
-            if (!Array.isArray(submissions) && submissions && submissions.results) submissions = submissions.results;
-          }
+        const subsResp = await fetch(`${API_BASE_URL}/feedback/submissions/`, { headers: authHeaders });
+        if (subsResp.status === 401) throw new Error('unauthorized');
+        if (subsResp.ok) {
+          const submissionsData = await subsResp.json().catch(() => []);
+          submissions = extractList(submissionsData);
         }
 
-        // Compute evaluation rate (simple heuristic)
-        const completed = Array.isArray(submissions) ? submissions.length : 0;
-        const evalRate = totalModules > 0 ? Math.round((completed / (totalModules || 1)) * 100) : 0;
+        // Map submissions to module forms so dashboard cards are report-based (per form), not per student.
+        const resolveFormIdFromSubmission = (submission) => {
+          const formModel = String(submission?.form_model || '').toLowerCase();
+          if (formModel && formModel !== 'moduleevaluationform') return null;
+
+          const primary = submission?.form_object_id;
+          if (primary !== null && primary !== undefined && formsById.has(String(primary))) return String(primary);
+
+          const secondary = submission?.form_id;
+          if (secondary !== null && secondary !== undefined && formsById.has(String(secondary))) return String(secondary);
+
+          const legacy = submission?.form;
+          if (legacy !== null && legacy !== undefined) {
+            if (typeof legacy === 'object') {
+              const legacyId = legacy.id ?? legacy.pk;
+              if (legacyId !== null && legacyId !== undefined && formsById.has(String(legacyId))) {
+                return String(legacyId);
+              }
+            } else if (formsById.has(String(legacy))) {
+              return String(legacy);
+            }
+          }
+
+          return null;
+        };
+
+        const responsesByForm = new Map();
+        (Array.isArray(submissions) ? submissions : []).forEach((submission) => {
+          const fid = resolveFormIdFromSubmission(submission);
+          if (!fid) return;
+          if (!responsesByForm.has(fid)) responsesByForm.set(fid, []);
+          responsesByForm.get(fid).push(submission);
+        });
+
+        const moduleReportRows = formsList.map((form) => {
+          const fid = String(form.id);
+          const formResponses = responsesByForm.get(fid) || [];
+
+          let ratingSum = 0;
+          let ratingCount = 0;
+          let moduleSum = 0;
+          let moduleCnt = 0;
+          let facultySum = 0;
+          let facultyCnt = 0;
+          
+          formResponses.forEach((submission) => {
+            const respList = Array.isArray(submission?.responses) ? submission.responses : [];
+            respList.forEach((item) => {
+              const questionId = getQuestionIdFromResponseItem(item);
+              const normalized = toNormalizedFivePointRating(item?.rating, questionId);
+              if (normalized !== null) {
+                ratingSum += normalized;
+                ratingCount += 1;
+                
+                if (isModuleEvaluationQuestion(questionId)) {
+                  moduleSum += normalized;
+                  moduleCnt += 1;
+                }
+                if (isFacultyEvaluationQuestion(questionId)) {
+                  facultySum += normalized;
+                  facultyCnt += 1;
+                }
+              }
+            });
+          });
+
+          const averageRating = ratingCount > 0 ? clampFivePoint(ratingSum / ratingCount) : 0;
+          const moduleRating = moduleCnt > 0 ? clampFivePoint(moduleSum / moduleCnt) : null;
+          const facultyRating = facultyCnt > 0 ? clampFivePoint(facultySum / facultyCnt) : null;
+          
+          const latestSubmissionDate = formResponses
+            .map((submission) => submission?.submitted_at || submission?.timestamp || submission?.time)
+            .filter(Boolean)
+            .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+
+          return {
+            id: fid,
+            module: form?.module_name || form?.subject_code || form?.subject_description || `Form ${fid}`,
+            subjectCode: form?.subject_code || `FORM-${fid}`,
+            instructor: form?.instructor_name || 'TBA',
+            responsesCount: formResponses.length,
+            ratingSum,
+            ratingCount,
+            averageRating,
+            moduleRating,
+            facultyRating,
+            date: latestSubmissionDate || form?.created_at || '',
+          };
+        });
+
+        const formsWithResponses = moduleReportRows.filter((row) => row.responsesCount > 0).length;
+        const evalRate = totalModules > 0 ? Math.round((formsWithResponses / totalModules) * 100) : 0;
 
         setStats([
           { title: "Total Students", value: totalStudents, description: "Active enrolled students", icon: GraduationCap, color: "bg-blue-50 text-blue-600", change: '' },
@@ -83,41 +247,54 @@ const DeptHeadDashboard = () => {
           { title: "Evaluation Rate", value: `${evalRate}%`, description: "Completion rate", icon: TrendingUp, color: "bg-amber-50 text-amber-600", change: '' },
         ]);
 
-        // Recent evaluations: take most recent submissions
-        const recent = (Array.isArray(submissions) ? submissions : []).slice().sort((a,b) => new Date(b.submitted_at || b.timestamp || b.time || 0) - new Date(a.submitted_at || a.timestamp || a.time || 0)).slice(0,6);
-        const mappedRecent = recent.map(s => {
-          const studentName = (s?.student && typeof s.student === 'object') ? `${s.student.firstname || ''} ${s.student.lastname || ''}`.trim() : (s.pseudonym || s.student || 'Student');
-          const studentId = (s?.student && typeof s.student === 'object') ? (s.student.student_number || '') : '';
-          const module = s.form_id || s.module || s.subject || s.form || '';
-          const instructor = s.instructor || s.instructor_name || '';
-          let rating = 0;
-          try {
-            const respList = Array.isArray(s.responses) ? s.responses : s.responses || [];
-            const rated = respList.map(r => Number(r.rating || r?.rating || 0)).filter(n => n > 0);
-            rating = rated.length ? (Math.round((rated.reduce((a,c) => a+c,0) / rated.length) * 10) / 10) : 0;
-          } catch(e) { rating = 0 }
-          return { student: studentName, studentId, module: module || '—', instructor: instructor || 'TBA', rating, date: s.submitted_at || s.timestamp || s.time || '' };
-        });
-        setRecentEvaluations(mappedRecent);
+        // Top rated modules (by module-specific rating), high -> low
+        const topModules = moduleReportRows
+          .slice()
+          .filter((row) => row.moduleRating !== null)
+          .sort((a, b) => b.moduleRating - a.moduleRating)
+          .slice(0, 5)
+          .map((row) => ({
+            student: row.module,
+            studentId: row.subjectCode,
+            module: `${row.responsesCount} response${row.responsesCount === 1 ? '' : 's'}`,
+            instructor: row.instructor,
+            rating: row.moduleRating, // use moduleRating as primary score here
+            moduleRating: row.moduleRating,
+            facultyRating: row.facultyRating,
+            date: row.date,
+          }));
+        setRecentEvaluations(topModules);
 
-        // Top rated faculty (aggregate by instructor name)
+        // Top rated faculty using overall normalized ratings (same basis as Faculty page calculations)
         const instructorMap = new Map();
-        (Array.isArray(submissions) ? submissions : []).forEach(s => {
-          const instructor = (s.instructor || s.instructor_name || s.form_id || '').toString().trim();
-          if (!instructor) return;
-          const respList = Array.isArray(s.responses) ? s.responses : s.responses || [];
-          const ratings = respList.map(r => Number(r.rating || r?.rating || 0)).filter(n => n > 0);
-          if (!ratings.length) return;
-          const agg = instructorMap.get(instructor) || { sum: 0, count: 0 };
-          agg.sum += ratings.reduce((a,c) => a+c, 0);
-          agg.count += ratings.length;
+        moduleReportRows.forEach((row) => {
+          const instructor = String(row.instructor || '').trim();
+          if (!instructor || instructor.toLowerCase() === 'tba') return;
+
+          const sourceRating = row.averageRating || null;
+          if (sourceRating === null || !Number.isFinite(sourceRating) || sourceRating <= 0) return;
+          const agg = instructorMap.get(instructor) || { sum: 0, count: 0, modules: new Set() };
+          agg.sum += sourceRating;
+          agg.count += 1;
+          agg.modules.add(row.module);
           instructorMap.set(instructor, agg);
         });
-        const instructors = Array.from(instructorMap.entries()).map(([name, agg]) => ({ name, rating: Math.round((agg.sum/agg.count) * 10) / 10, evaluations: agg.count }));
+        const instructors = Array.from(instructorMap.entries()).map(([name, agg]) => ({
+          name,
+          rating: clampFivePoint(agg.sum / agg.count),
+          evaluations: agg.count,
+          modules: agg.modules.size,
+        }));
         instructors.sort((a,b) => b.rating - a.rating);
-        setTopRatedFaculty(instructors.slice(0,6));
+        setTopRatedFaculty(instructors.slice(0,5));
 
       } catch (e) {
+        if ((e && e.message) === 'unauthorized') {
+          clearSession();
+          window.history.replaceState({}, '', '/');
+          window.dispatchEvent(new PopStateEvent('popstate'));
+          return;
+        }
         console.error('depthead dashboard fetch error', e);
         setLoadError('Unable to load dashboard data.');
       } finally {
@@ -126,7 +303,7 @@ const DeptHeadDashboard = () => {
     };
 
     fetchDashboard();
-  }, []);
+  }, [API_BASE_URL]);
 
   return (
     <div className="min-h-screen w-full font-['Optima-Medium','Optima','Candara','sans-serif'] text-slate-900 bg-slate-50 flex flex-col">
@@ -137,26 +314,19 @@ const DeptHeadDashboard = () => {
         <main className="flex-1 overflow-y-auto">
           
           {/* TOP WELCOME SECTION */}
-          <section className="bg-white border-b border-slate-200 py-10">
-            <div className="container mx-auto px-8 max-w-6xl">
+          <section className="border-b border-slate-200 py-10">
+            <div className="container mx-auto px-8 max-w-7xl w-full">
               <div className="flex flex-col md:flex-row justify-between items-center gap-6">
                 <div>
-                  <h1 className="text-3xl font-bold text-[#1f474d] tracking-tight">Department Overview</h1>
-                  <p className="text-slate-500 mt-1">{deptHeadInfo.name} • {deptHeadInfo.department} Head</p>
+                  <h1 className="text-4xl font-bold text-[#1f2937] tracking-tight">Department Overview</h1>
+                  <p className="text-slate-500 mt-1">{deptHeadInfo.name}{deptHeadInfo.department ? ` • ${deptHeadInfo.department}` : ''}</p>
                 </div>
-                <div className="flex gap-3">
-                  <button onClick={() => handleNavigation('/dept-head/reports?download=1')} className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg font-bold text-sm hover:bg-slate-200 transition-colors">
-                    Download Report
-                  </button>
-                  <button onClick={() => handleNavigation('/dept-head/analytics')} className="px-4 py-2 bg-[#1f474d] text-white rounded-lg font-bold text-sm hover:bg-[#2a5d65] transition-colors shadow-lg shadow-teal-100">
-                    Generate Analytics
-                  </button>
-                </div>
+                {/* header actions removed as requested */}
               </div>
             </div>
           </section>
 
-          <div className="container mx-auto px-8 max-w-6xl py-10">
+          <div className="container mx-auto px-8 max-w-7xl w-full py-10">
             
             {/* STATS GRID */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
@@ -189,16 +359,16 @@ const DeptHeadDashboard = () => {
               <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
                 <div className="p-6 border-b border-slate-100 flex justify-between items-center">
                   <div>
-                    <h2 className="text-lg font-bold text-slate-800">Recent Evaluations</h2>
-                    <p className="text-slate-400 text-xs">Latest student submissions</p>
+                    <h2 className="text-lg font-bold text-slate-800">Top Rated Module Evaluations</h2>
+                    <p className="text-slate-400 text-xs">Highest-rated module evaluations</p>
                   </div>
-                  <button onClick={() => handleNavigation('/dept-head/reports')} className="text-[#1f474d] text-xs font-bold hover:underline flex items-center gap-1">
+                  <button onClick={() => handleNavigation('/depthead-dashboard/reports')} className="text-[#1f474d] text-xs font-bold hover:underline flex items-center gap-1">
                     View All <ChevronRight size={14} />
                   </button>
                 </div>
                 <div className="p-6 space-y-4">
                   {recentEvaluations.length === 0 ? (
-                    <div className="p-6 text-center text-slate-400 italic">No recent evaluations available.</div>
+                    <div className="p-6 text-center text-slate-400 italic">No module ratings available.</div>
                   ) : (
                     recentEvaluations.map((evaluation, index) => (
                       <div key={index} className="flex items-start gap-4 p-4 rounded-xl bg-slate-50 border border-slate-100 hover:border-slate-200 transition-colors">
@@ -208,12 +378,23 @@ const DeptHeadDashboard = () => {
                             <span className="text-[10px] text-slate-400 font-mono">#{evaluation.studentId}</span>
                           </div>
                           <p className="text-xs text-[#1f474d] truncate font-bold">{evaluation.module}</p>
-                          <p className="text-[10px] text-slate-500 italic mt-0.5">{evaluation.instructor}</p>
+                          {/* <p className="text-[10px] text-slate-500 italic mt-0.5">{evaluation.instructor}</p> */}
                         </div>
                         <div className="flex flex-col items-end gap-1">
-                          <div className="flex items-center gap-1 bg-white px-2 py-1 rounded-lg border border-slate-100 shadow-sm">
-                            <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
-                            <span className="text-sm font-bold text-slate-800">{evaluation.rating}</span>
+                          <div className="space-y-0.5">
+                            {evaluation.moduleRating !== null && (
+                              <div className="flex items-center gap-1 bg-white px-2 py-1 rounded-lg border border-slate-100 shadow-sm">
+                                <Star className="h-3 w-3 fill-blue-400 text-blue-400" />
+                                <span className="text-xs font-bold text-slate-800">{evaluation.moduleRating.toFixed(1)}</span>
+                                <span className="text-[9px] text-slate-500">Mod</span>
+                              </div>
+                            )}
+                            {evaluation.moduleRating === null && (
+                              <div className="flex items-center gap-1 bg-white px-2 py-1 rounded-lg border border-slate-100 shadow-sm">
+                                <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
+                                <span className="text-sm font-bold text-slate-800">{evaluation.rating.toFixed(1)}</span>
+                              </div>
+                            )}
                           </div>
                           <span className="text-[10px] text-slate-400 font-medium">{evaluation.date}</span>
                         </div>
@@ -251,7 +432,7 @@ const DeptHeadDashboard = () => {
                         </div>
                         <div className="flex items-center gap-1.5">
                           <Star className="h-4 w-4 fill-amber-400 text-amber-400" />
-                          <span className="text-lg font-bold text-slate-800">{faculty.rating}</span>
+                          <span className="text-lg font-bold text-slate-800">{Number(faculty.rating || 0).toFixed(1)}</span>
                         </div>
                       </div>
                     ))

@@ -104,13 +104,13 @@ const Header = ({ userName, userRole }) => {
                <p className="text-cyan-300 text-[10px] uppercase tracking-wider">{resolvedRole}</p>
              </div>
              
-             <div className="relative">
+             {/* <div className="relative">
                <SafeImg
                  src="https://api.dicebear.com/7.x/avataaars/svg?seed=Felix"
                  className="w-10 h-10 rounded-full border-2 border-[#ffcc00]/50 object-cover"
                  alt="avatar"
                />
-             </div>
+             </div> */}
 
              
           </div>

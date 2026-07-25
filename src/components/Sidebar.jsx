@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { BookOpen, Users, History as HistoryIcon, GraduationCap, ClipboardList, BarChart3, FileText, LogOut, Menu, X } from 'lucide-react';
+import { logoutAndReload } from '../utils/auth';
 // import logo from '../assets/header-logo.png';
 
-const Sidebar = ({ role, activeItem, onLogout }) => {
+const Sidebar = ({ role, activeItem }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
 
@@ -17,20 +18,26 @@ const Sidebar = ({ role, activeItem, onLogout }) => {
       case 'student':
         return [
           { id: 'dashboard', label: 'Dashboard', icon: BarChart3, path: '/dashboard' },
-          { id: 'modules', label: 'My Modules', icon: BookOpen, path: '/dashboard/modules' },
-          { id: 'instructors', label: 'Instructors', icon: Users, path: '/dashboard/instructors' },
-          { id: 'history', label: 'History', icon: HistoryIcon, path: '/dashboard/history' }
+          { id: 'classroom', label: 'Classroom', icon: GraduationCap, path: '/dashboard/classroom' },
+          { id: 'evaluation', label: 'Evaluation Form', icon: BookOpen, path: '/dashboard/evaluation/modules' },
+          { id: 'history', label: 'History', icon: HistoryIcon, path: '/dashboard/history' },
+          { id: 'audit-log', label: 'Audit Log', icon: ClipboardList, path: '/dashboard/audit-log' }
         ];
       case 'faculty':
         return [
-          { id: 'dashboard', label: 'Dashboard', icon: BarChart3, path: '/faculty-dashboard' }
+          { id: 'dashboard', label: 'Dashboard', icon: BarChart3, path: '/faculty-dashboard' },
+          { id: 'classroom', label: 'Classroom', icon: GraduationCap, path: '/faculty-dashboard/classroom' },
+          { id: 'forms', label: 'Forms', icon: BookOpen, path: '/faculty-dashboard/forms' },
+          { id: 'enrollments', label: 'Enrollments', icon: ClipboardList, path: '/faculty-dashboard/enrollments' },
+          { id: 'audit-log', label: 'Audit Log', icon: ClipboardList, path: '/faculty-dashboard/audit-log' }
         ];
       case 'depthead':
         return [
           { id: 'dashboard', label: 'Dashboard', icon: BarChart3, path: '/depthead-dashboard' },
           { id: 'students', label: 'Students', icon: GraduationCap, path: '/depthead-dashboard/students' },
+          { id: 'courses', label: 'Courses', icon: BookOpen, path: '/depthead-dashboard/courses' },
+          { id: 'block-sections', label: 'Block/Sections', icon: ClipboardList, path: '/depthead-dashboard/block-sections' },
           { id: 'faculty', label: 'Faculty', icon: Users, path: '/depthead-dashboard/faculty' },
-          { id: 'forms', label: 'Forms', icon: BookOpen, path: '/depthead-dashboard/forms' },
           { id: 'reports', label: 'Reports', icon: FileText, path: '/depthead-dashboard/reports' },
           { id: 'audit-log', label: 'Audit Log', icon: ClipboardList, path: '/depthead-dashboard/audit-log' }
         ];
@@ -45,20 +52,11 @@ const Sidebar = ({ role, activeItem, onLogout }) => {
     setIsConfirmOpen(true);
   };
 
-  const handleConfirmLogout = () => {
-    try {
-      sessionStorage.removeItem('authToken');
-      sessionStorage.removeItem('authUser');
-    } catch (e) {}
-    try {
-      localStorage.removeItem('authToken');
-      localStorage.removeItem('authUser');
-    } catch (e) {}
-    if (typeof onLogout === 'function') onLogout();
-    window.history.pushState({}, '', '/');
-    window.dispatchEvent(new PopStateEvent('popstate'));
+  const handleConfirmLogout = async () => {
     setIsOpen(false);
     setIsConfirmOpen(false);
+
+    await logoutAndReload('/');
   };
 
   const handleCancelLogout = () => {

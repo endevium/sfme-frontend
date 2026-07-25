@@ -1,6 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Sidebar from '../../components/Sidebar';
-import Header from '../../components/Header'; // Added Header to match Student page
 import {
   Users,
   TrendingUp,
@@ -11,32 +10,110 @@ import {
   Edit,
   Folder,
 } from 'lucide-react';
+import { getToken } from '../../utils/auth';
+
+const normalizePersonStatus = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'archived' ? 'Archived' : 'Active';
+};
+
+const getQuestionScale = (questionIdRaw) => {
+  const questionId = String(questionIdRaw || '').trim().toLowerCase();
+
+  // Current student questionnaire:
+  // - learn_* uses 1..4 scale
+  // - overall_* uses 1..10 scale
+  if (questionId.startsWith('learn_')) return { min: 1, max: 4 };
+  if (questionId === 'overall_instructor' || questionId === 'overall_modules') return { min: 1, max: 10 };
+
+  // Legacy 5-point forms.
+  if (
+    questionId.startsWith('inst_') ||
+    questionId.startsWith('content_') ||
+    questionId.startsWith('assess_') ||
+    questionId.startsWith('env_') ||
+    questionId.startsWith('comp_') ||
+    questionId.startsWith('method_') ||
+    questionId.startsWith('engage_') ||
+    questionId.startsWith('feedback_') ||
+    questionId.startsWith('prof_') ||
+    questionId === 'overall_rating' ||
+    questionId === 'overall_recommend'
+  ) {
+    return { min: 1, max: 5 };
+  }
+
+  return null;
+};
+
+const toNormalizedFivePointRating = (rawRating, questionIdRaw) => {
+  const rating = Number(rawRating);
+  if (!Number.isFinite(rating)) return null;
+
+  const scale = getQuestionScale(questionIdRaw);
+  if (!scale) return null;
+  if (rating < scale.min || rating > scale.max) return null;
+
+  if (scale.min === 1 && scale.max === 5) return rating;
+  return 1 + ((rating - scale.min) * 4) / (scale.max - scale.min);
+};
+
+const extractList = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.results)) return payload.results;
+  if (payload && Array.isArray(payload.data)) return payload.data;
+  return [];
+};
+
+const resolveModuleFormIdFromResponse = (responseItem) => {
+  const modelName = String(responseItem?.form_model || '').toLowerCase();
+  if (modelName && modelName !== 'moduleevaluationform') return null;
+
+  const primary = responseItem?.form_object_id;
+  if (primary !== null && primary !== undefined) return String(primary);
+
+  const secondary = responseItem?.form_id;
+  if (secondary !== null && secondary !== undefined) return String(secondary);
+
+  const legacy = responseItem?.form;
+  if (legacy !== null && legacy !== undefined) {
+    if (typeof legacy === 'object') {
+      const legacyId = legacy.id ?? legacy.pk;
+      if (legacyId !== null && legacyId !== undefined) return String(legacyId);
+    } else {
+      return String(legacy);
+    }
+  }
+
+  return null;
+};
 
 const FacultyPages = () => {
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+  const MAX_CSV_SIZE = 2 * 1024 * 1024; // 2MB
 
   const [facultyData, setFacultyData] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [facultyInsightsById, setFacultyInsightsById] = useState({});
 
-  // Modal & Form State
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [formErrors, setFormErrors] = useState({});
 
-  // Bulk Import State
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
   const [bulkImportResult, setBulkImportResult] = useState(null);
   const [selectedFaculty, setSelectedFaculty] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [isArchiveOpenFaculty, setIsArchiveOpenFaculty] = useState(false);
+  const [showArchivedFaculty, setShowArchivedFaculty] = useState(false);
   const [archivedFaculty, setArchivedFaculty] = useState([]);
   const [isLoadingArchivedFaculty, setIsLoadingArchivedFaculty] = useState(false);
   const [archiveFacultyError, setArchiveFacultyError] = useState('');
+  const [facultyToArchive, setFacultyToArchive] = useState(null);
   const [formValues, setFormValues] = useState({
     email: '',
     firstname: '',
@@ -47,33 +124,39 @@ const FacultyPages = () => {
     birthdate: '',
   });
 
-  const mapFaculty = (f) => ({
+  const mapFaculty = (f, metrics = {}) => ({
     id: f?.faculty_id || f?.id || f?.email || 'N/A',
     name: `${f?.firstname || f?.name || ''} ${f?.lastname || ''}`.trim() || 'Unnamed',
     title: f?.title || 'Faculty',
     dept: f?.department || f?.dept || 'N/A',
-    modules: Number(f?.modules) || 0,
-    students: Number(f?.students) || 0,
-    evaluations: Number(f?.evaluations) || 0,
-    rating: Number(f?.rating) || 0,
-    status: typeof f?.status === 'boolean' ? (f.status ? 'Active' : 'Inactive') : (f?.status || 'Active'),
+    modules: Number(metrics?.modules ?? f?.modules) || 0,
+    students: Number(metrics?.students ?? f?.students) || 0,
+    evaluations: Number(metrics?.evaluations ?? f?.evaluations) || 0,
+    rating: Number(metrics?.rating ?? f?.rating) || 0,
+    status: normalizePersonStatus(f?.status),
   });
+
+  const validateCsvFile = (file) => {
+    if (!file) return 'No file selected.';
+    if (!String(file.name || '').toLowerCase().endsWith('.csv')) return 'Only .csv files are allowed.';
+    if (file.size > MAX_CSV_SIZE) return 'File is too large (max 2MB).';
+    // best-effort mime check (browsers vary)
+    const allowedTypes = ['text/csv', 'application/csv', 'application/vnd.ms-excel'];
+    if (file.type && !allowedTypes.includes(file.type)) return `Invalid file type: ${file.type}. Please upload a CSV.`;
+    return null;
+  };
 
   // Helper function to create audit log entries
   const createAuditLog = async (action, message) => {
     try {
-      const auditData = {
-        action: action,
-        message: message,
-        category: 'USER MANAGEMENT',
-        status: 'Success',
-      };
+      const token = getToken();
+      const auditData = { action, message, category: 'USER MANAGEMENT', status: 'Success' };
 
       await fetch(`${API_BASE_URL}/audit-logs/`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(auditData),
       });
@@ -82,41 +165,216 @@ const FacultyPages = () => {
     }
   };
 
-  const fetchFaculty = async () => {
+  const fetchFaculty = useCallback(async () => {
     setIsLoading(true);
     setLoadError('');
     try {
-      const res = await fetch(`${API_BASE_URL}/faculty/`);
-      const data = await res.json().catch(() => []);
-      if (!res.ok) {
-        setLoadError(data?.detail || 'Unable to load faculty.');
+      const token = getToken();
+      const headers = {
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      };
+
+      const [facultyRes, classroomsRes, formsRes, submissionsRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/faculty/`, { headers }),
+        fetch(`${API_BASE_URL}/classrooms/`, { headers }),
+        fetch(`${API_BASE_URL}/module-evaluation-forms/`, { headers }),
+        fetch(`${API_BASE_URL}/feedback/submissions/`, { headers }),
+      ]);
+
+      const facultyPayload = await facultyRes.json().catch(() => []);
+      if (!facultyRes.ok) {
+        setLoadError(facultyPayload?.detail || 'Unable to load faculty.');
         return;
       }
-      const list = Array.isArray(data) ? data : [];
-      setFacultyData(list.map(mapFaculty));
+
+      const facultyList = extractList(facultyPayload);
+
+      const classroomsPayload = await classroomsRes.json().catch(() => []);
+      const classrooms = classroomsRes.ok ? extractList(classroomsPayload) : [];
+
+      const formsPayload = await formsRes.json().catch(() => []);
+      const moduleForms = formsRes.ok ? extractList(formsPayload) : [];
+
+      const submissionsPayload = await submissionsRes.json().catch(() => []);
+      const submissions = submissionsRes.ok ? extractList(submissionsPayload) : [];
+
+      const classroomsById = new Map();
+      const facultyClassroomMap = new Map();
+      for (const classroom of classrooms) {
+        const classroomId = String(classroom?.id || '');
+        const facultyId = String(classroom?.faculty || '');
+        if (!classroomId || !facultyId) continue;
+
+        classroomsById.set(classroomId, classroom);
+        if (!facultyClassroomMap.has(facultyId)) {
+          facultyClassroomMap.set(facultyId, { subjectCodes: new Set(), classroomIds: new Set() });
+        }
+
+        const bucket = facultyClassroomMap.get(facultyId);
+        bucket.classroomIds.add(classroomId);
+
+        const subjectCode = String(classroom?.subject_code || '').trim();
+        if (subjectCode) bucket.subjectCodes.add(subjectCode);
+      }
+
+      const formToFacultyId = new Map();
+      for (const form of moduleForms) {
+        const formId = String(form?.id || '');
+        const classroomId = String(form?.classroom || '');
+        if (!formId || !classroomId) continue;
+
+        const classroom = classroomsById.get(classroomId);
+        if (!classroom) continue;
+
+        const facultyId = String(classroom?.faculty || '');
+        if (!facultyId) continue;
+        formToFacultyId.set(formId, facultyId);
+      }
+
+      const facultySubmissionStats = new Map();
+      for (const submission of submissions) {
+        const formId = resolveModuleFormIdFromResponse(submission);
+        if (!formId) continue;
+
+        const facultyId = formToFacultyId.get(formId);
+        if (!facultyId) continue;
+
+        if (!facultySubmissionStats.has(facultyId)) {
+          facultySubmissionStats.set(facultyId, {
+            evaluations: 0,
+            ratingSum: 0,
+            ratingCount: 0,
+            studentIds: new Set(),
+          });
+        }
+
+        const statsBucket = facultySubmissionStats.get(facultyId);
+        statsBucket.evaluations += 1;
+
+        const studentId = submission?.student;
+        if (studentId !== null && studentId !== undefined && String(studentId).trim()) {
+          statsBucket.studentIds.add(String(studentId));
+        }
+
+        const respList = Array.isArray(submission?.responses) ? submission.responses : [];
+        for (const item of respList) {
+          const questionId = item?.question || item?.question_code || item?.question_id;
+          const rv = toNormalizedFivePointRating(item?.rating, questionId);
+          if (rv === null) continue;
+          statsBucket.ratingSum += rv;
+          statsBucket.ratingCount += 1;
+        }
+      }
+
+      const nextInsightsById = {};
+      const mapped = facultyList.map((faculty) => {
+        const facultyId = String(faculty?.id || faculty?.faculty_id || '');
+        const classStats = facultyClassroomMap.get(facultyId);
+        const subStats = facultySubmissionStats.get(facultyId);
+
+        const ratingBreakdown = { very_good: 0, good: 0, fair: 0, poor: 0 };
+
+        if (subStats) {
+          for (const submission of submissions) {
+            const formId = resolveModuleFormIdFromResponse(submission);
+            if (!formId) continue;
+            const submissionFacultyId = formToFacultyId.get(formId);
+            if (submissionFacultyId !== facultyId) continue;
+
+            const respList = Array.isArray(submission?.responses) ? submission.responses : [];
+            for (const item of respList) {
+              const questionId = item?.question || item?.question_code || item?.question_id;
+              const rv = toNormalizedFivePointRating(item?.rating, questionId);
+              if (rv === null) continue;
+
+              if (rv >= 4.5) ratingBreakdown.very_good += 1;
+              else if (rv >= 3.5) ratingBreakdown.good += 1;
+              else if (rv >= 2.5) ratingBreakdown.fair += 1;
+              else ratingBreakdown.poor += 1;
+            }
+          }
+        }
+
+        const ratingTotal = ratingBreakdown.very_good + ratingBreakdown.good + ratingBreakdown.fair + ratingBreakdown.poor;
+        const distribution = [
+          { key: 'very_good', label: 'Very Good (>=4.5)', color: 'bg-emerald-500' },
+          { key: 'good', label: 'Good (3.5-4.49)', color: 'bg-blue-500' },
+          { key: 'fair', label: 'Fair (2.5-3.49)', color: 'bg-amber-500' },
+          { key: 'poor', label: 'Poor (<2.5)', color: 'bg-red-500' },
+        ].map((item) => ({
+          ...item,
+          count: ratingBreakdown[item.key],
+          percent: ratingTotal > 0 ? Math.round((ratingBreakdown[item.key] / ratingTotal) * 100) : 0,
+        }));
+
+        const averageRating = subStats && subStats.ratingCount > 0
+          ? Number((subStats.ratingSum / subStats.ratingCount).toFixed(1))
+          : 0;
+
+        const metrics = {
+          modules: classStats ? classStats.subjectCodes.size : 0,
+          students: subStats ? subStats.studentIds.size : 0,
+          evaluations: subStats ? subStats.evaluations : 0,
+          rating: averageRating,
+        };
+
+        if (facultyId) {
+          nextInsightsById[facultyId] = {
+            ...metrics,
+            ratingBreakdown,
+            ratingDistribution: distribution,
+          };
+        }
+
+        return mapFaculty(faculty, metrics);
+      });
+
+      setFacultyData(mapped);
+      setFacultyInsightsById(nextInsightsById);
     } catch {
       setLoadError('Unable to reach the server. Please try again.');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [API_BASE_URL]);
 
   useEffect(() => {
     fetchFaculty();
-  }, []);
+  }, [fetchFaculty]);
 
   const showFacultyDetails = async (facultyId) => {
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/faculty/${facultyId}/`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` },
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
       });
       if (!res.ok) {
         setErrorMessage('Unable to load faculty details.');
         return;
       }
       const data = await res.json();
+      const idKey = String(data.id || data.pk || facultyId);
+      const localRow = facultyData.find((f) => String(f.id) === String(facultyId));
+      const insight = facultyInsightsById[idKey] || {};
       // include pk for consistency
-      setSelectedFaculty({ ...data, pk: data.id || data.pk || facultyId });
+      setSelectedFaculty({
+        ...data,
+        pk: data.id || data.pk || facultyId,
+        metrics: {
+          modules: insight.modules ?? localRow?.modules ?? 0,
+          students: insight.students ?? localRow?.students ?? 0,
+          evaluations: insight.evaluations ?? localRow?.evaluations ?? 0,
+          rating: insight.rating ?? localRow?.rating ?? 0,
+          ratingDistribution: insight.ratingDistribution || [
+            { key: 'very_good', label: 'Very Good (>=4.5)', color: 'bg-emerald-500', count: 0, percent: 0 },
+            { key: 'good', label: 'Good (3.5-4.49)', color: 'bg-blue-500', count: 0, percent: 0 },
+            { key: 'fair', label: 'Fair (2.5-3.49)', color: 'bg-amber-500', count: 0, percent: 0 },
+            { key: 'poor', label: 'Poor (<2.5)', color: 'bg-red-500', count: 0, percent: 0 },
+          ],
+        },
+      });
     } catch {
       setErrorMessage('Unable to reach the server.');
     }
@@ -124,8 +382,11 @@ const FacultyPages = () => {
 
   const startEditFaculty = async (facultyId) => {
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/faculty/${facultyId}/`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` },
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
       });
       if (!res.ok) {
         setErrorMessage('Unable to load faculty for editing.');
@@ -151,18 +412,17 @@ const FacultyPages = () => {
     }
   };
 
-  const archiveFaculty = async (facultyId) => {
-    const ok = window.confirm('Archive this faculty member? This will remove them from the active list.');
-    if (!ok) return;
+  const archiveFaculty = async (faculty) => {
+    if (!faculty?.id) return;
     try {
-      // Soft-archive via PATCH
-      const res = await fetch(`${API_BASE_URL}/faculty/${facultyId}/`, {
+      const token = getToken();
+      const res = await fetch(`${API_BASE_URL}/faculty/${faculty.id}/`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ archived: true }),
+        body: JSON.stringify({ status: 'archived' }),
       });
       if (!res.ok) {
         setErrorMessage('Unable to archive faculty.');
@@ -171,10 +431,12 @@ const FacultyPages = () => {
       const facultyData = await res.json();
       await createAuditLog(
         'Archived Faculty',
-        `Archived faculty member: ${facultyData.firstname || ''} ${facultyData.lastname || ''} (${facultyData.email || facultyId})`
+        `Archived faculty member: ${facultyData.firstname || ''} ${facultyData.lastname || ''} (${facultyData.email || faculty.id})`
       );
-      setFacultyData((prev) => prev.filter((f) => f.id !== facultyId));
-    } catch (e) {
+      setFacultyData((prev) => prev.filter((f) => f.id !== faculty.id));
+      setArchivedFaculty((prev) => [mapFaculty(facultyData), ...prev.filter((f) => f.id !== faculty.id)]);
+      setFacultyToArchive(null);
+    } catch {
       setErrorMessage('Unable to reach the server.');
     }
   };
@@ -183,8 +445,11 @@ const FacultyPages = () => {
     setIsLoadingArchivedFaculty(true);
     setArchiveFacultyError('');
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/faculty/archived/`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` },
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
       });
       if (!res.ok) {
         setArchiveFacultyError('Unable to load archived faculty.');
@@ -194,7 +459,7 @@ const FacultyPages = () => {
       const data = await res.json();
       const list = Array.isArray(data) ? data : [];
       setArchivedFaculty(list.map(mapFaculty));
-    } catch (e) {
+    } catch {
       setArchiveFacultyError('Unable to reach the server.');
       setArchivedFaculty([]);
     } finally {
@@ -206,13 +471,14 @@ const FacultyPages = () => {
     const ok = window.confirm('Restore this faculty member? This will make them active again.');
     if (!ok) return;
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/faculty/${facultyId}/`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ archived: false }),
+        body: JSON.stringify({ status: 'active' }),
       });
       if (!res.ok) {
         setArchiveFacultyError('Unable to restore faculty.');
@@ -220,9 +486,9 @@ const FacultyPages = () => {
       }
       const data = await res.json();
       await createAuditLog('Restored Faculty', `Restored faculty: ${data.firstname || ''} ${data.lastname || ''} (${data.email || facultyId})`);
-      fetchFaculty();
-      fetchArchivedFaculty();
-    } catch (e) {
+      setFacultyData((prev) => [mapFaculty(data), ...prev.filter((f) => f.id !== facultyId)]);
+      setArchivedFaculty((prev) => prev.filter((f) => f.id !== facultyId));
+    } catch {
       setArchiveFacultyError('Unable to reach the server.');
     }
   };
@@ -230,7 +496,12 @@ const FacultyPages = () => {
   // Form Handlers
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setFormValues((prev) => ({ ...prev, [name]: value }));
+    // Restrict contact_number to digits only
+    let newValue = value;
+    if (name === 'contact_number') {
+      newValue = String(value || '').replace(/\D+/g, '');
+    }
+    setFormValues((prev) => ({ ...prev, [name]: newValue }));
     setFormErrors((prev) => ({ ...prev, [name]: undefined }));
   };
 
@@ -299,13 +570,14 @@ const FacultyPages = () => {
 
     try {
       setIsSubmitting(true);
+      const token = getToken()
       const method = isEditing ? 'PUT' : 'POST';
       const url = isEditing ? `${API_BASE_URL}/faculty/${editingId}/` : `${API_BASE_URL}/faculty/`;
       const response = await fetch(url, {
         method: method,
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(formValues),
       });
@@ -342,6 +614,65 @@ const FacultyPages = () => {
     }
   };
 
+  const downloadCSVTemplate = () => {
+    const csvContent = 'email,firstname,middlename,lastname,department,contact_number,birthdate\njohn.doe@upang.edu.ph,John,M,Doe,CITE,639123456789,1985-05-15\njane.smith@upang.edu.ph,Jane,L,Smith,CITE,639987654321,1990-08-22';
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'faculty_import_template.csv';
+    link.click();
+  };
+
+  // Export current faculty table to CSV
+  const exportToCSV = (rows, headers, filename = 'faculty-list.csv') => {
+    if (!rows || rows.length === 0) {
+      window.alert('No records to export.');
+      return;
+    }
+
+    const escape = (value) => {
+      if (value === null || value === undefined) return '';
+      const s = String(value).replace(/\r?\n/g, ' ');
+      if (s.includes('"')) return '"' + s.replace(/"/g, '""') + '"';
+      if (s.includes(',') || s.includes('\n')) return '"' + s + '"';
+      return s;
+    };
+
+    const lines = [headers.join(',')];
+    for (const r of rows) {
+      const row = [
+        r.id || '',
+        r.name || '',
+        r.title || '',
+        r.dept || '',
+        r.modules ?? '',
+        r.students ?? '',
+        r.evaluations ?? '',
+        r.rating ?? '',
+        r.status || '',
+      ].map(escape).join(',');
+      lines.push(row);
+    }
+
+    const csv = lines.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportFaculty = () => {
+    const rows = tableFaculty;
+    const headers = ['Faculty ID','Name','Title','Department','Modules','Students','Evaluations','Rating','Status'];
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    exportToCSV(rows, headers, `faculty-list_${stamp}.csv`);
+  };
+
   const handleBulkImport = async (file) => {
     if (!file) return;
 
@@ -349,13 +680,14 @@ const FacultyPages = () => {
     setBulkImportResult(null);
 
     try {
+      const token = getToken();
       const formData = new FormData();
       formData.append('file', file);
 
       const response = await fetch(`${API_BASE_URL}/faculty/bulk-import/`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: formData,
       });
@@ -363,10 +695,22 @@ const FacultyPages = () => {
       const data = await response.json();
 
       if (!response.ok) {
+        // Better error messaging with additional details
+        let errorMsg = data?.detail || 'Bulk import failed';
+        const errorDetails = [];
+        
+        // Add missing/found columns info if available
+        if (data?.missing && data.missing.length > 0) {
+          errorDetails.push(`Missing: ${data.missing.join(', ')}`);
+        }
+        if (data?.found && data.found.length > 0) {
+          errorDetails.push(`Found: ${data.found.join(', ')}`);
+        }
+        
         setBulkImportResult({
           success: false,
-          message: data?.detail || 'Bulk import failed',
-          errors: data?.errors || []
+          message: errorMsg,
+          errors: data?.errors || errorDetails
         });
         return;
       }
@@ -392,7 +736,7 @@ const FacultyPages = () => {
     }
   };
 
-  const filteredFaculty = useMemo(() => {
+  const filteredActiveFaculty = useMemo(() => {
     if (!searchQuery.trim()) return facultyData;
     const q = searchQuery.toLowerCase();
     return facultyData.filter((f) => 
@@ -402,6 +746,19 @@ const FacultyPages = () => {
       String(f.title).toLowerCase().includes(q)
     );
   }, [searchQuery, facultyData]);
+
+  const filteredArchivedFaculty = useMemo(() => {
+    if (!searchQuery.trim()) return archivedFaculty;
+    const q = searchQuery.toLowerCase();
+    return archivedFaculty.filter((f) => 
+      String(f.id).toLowerCase().includes(q) ||
+      String(f.name).toLowerCase().includes(q) ||
+      String(f.dept).toLowerCase().includes(q) ||
+      String(f.title).toLowerCase().includes(q)
+    );
+  }, [searchQuery, archivedFaculty]);
+
+  const tableFaculty = showArchivedFaculty ? filteredArchivedFaculty : filteredActiveFaculty;
 
   const totalFaculty = facultyData.length;
   const activeFaculty = facultyData.filter((f) => f.status === 'Active').length;
@@ -416,6 +773,7 @@ const FacultyPages = () => {
         <Sidebar role="depthead" activeItem="faculty" />
 
         <main className="flex-1 p-8 overflow-y-auto">
+          <div className="max-w-7xl mx-auto w-full">
           <div className="mb-8">
             <h1 className="text-4xl font-bold text-[#1f2937]">Faculty Management</h1>
             <p className="text-slate-500 mt-1">View and manage all teaching staff</p>
@@ -465,29 +823,33 @@ const FacultyPages = () => {
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-center gap-4">
               <div>
-                <h2 className="text-xl font-bold text-slate-800">All Faculty Members</h2>
-                <p className="text-slate-400 text-sm">Complete list of teaching staff</p>
+                <h2 className="text-xl font-bold text-slate-800">{showArchivedFaculty ? 'Archived Faculty Members' : 'All Faculty Members'}</h2>
+                <p className="text-slate-400 text-sm">{showArchivedFaculty ? 'Archived teaching staff list' : 'Complete list of teaching staff'}</p>
               </div>
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => { setIsEditing(false); setEditingId(null); resetForm(); setIsAddOpen(true); }}
-                  className="flex items-center gap-2 px-4 py-2 bg-[#ffcc00] text-[#041c32] rounded-lg text-sm font-bold hover:bg-[#e6b800] transition-all"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#1f474d] text-white rounded-lg text-sm font-semibold hover:bg-[#18393e] transition-all"
                 >
                   + Add Faculty
                 </button>
                 <button
                   className="flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-sm font-bold hover:bg-slate-200 transition-all"
-                  onClick={() => { setIsArchiveOpenFaculty(true); fetchArchivedFaculty(); }}
+                  onClick={() => {
+                    const nextValue = !showArchivedFaculty;
+                    setShowArchivedFaculty(nextValue);
+                    if (nextValue) fetchArchivedFaculty();
+                  }}
                 >
-                  <Folder size={16} /> Archived Faculty
+                  <Folder size={16} /> {showArchivedFaculty ? 'Back To Active Faculty' : 'Archived Faculty'}
                 </button>
                 <button
-                  className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700 transition-all"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#1f474d] text-white rounded-lg text-sm font-semibold hover:bg-[#18393e] transition-all"
                   onClick={() => setIsBulkImportOpen(true)}
                 >
                   📁 Bulk Import
                 </button>
-                <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all">
+                <button onClick={handleExportFaculty} className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-all">
                   <Download size={16} /> Export List
                 </button>
               </div>
@@ -522,7 +884,7 @@ const FacultyPages = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredFaculty.map((faculty, idx) => (
+                  {tableFaculty.map((faculty, idx) => (
                     <tr key={idx} className="hover:bg-slate-50/80 transition-colors">
                       <td className="px-6 py-4 text-xs font-mono text-slate-500">{faculty.id}</td>
                       <td className="px-6 py-4 text-sm font-black text-slate-800">{faculty.name}</td>
@@ -537,7 +899,7 @@ const FacultyPages = () => {
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <span className="px-3 py-1 bg-emerald-50 text-emerald-600 border border-emerald-100 text-[10px] font-black uppercase rounded-lg tracking-wider">
+                        <span className={`px-3 py-1 border text-[10px] font-black uppercase rounded-lg tracking-wider ${faculty.status === 'Archived' ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}`}>
                           {faculty.status}
                         </span>
                       </td>
@@ -546,12 +908,20 @@ const FacultyPages = () => {
                           <button onClick={() => showFacultyDetails(faculty.id)} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all" title="View">
                             <Eye size={18} />
                           </button>
-                          <button onClick={() => startEditFaculty(faculty.id)} className="p-2 text-sky-600 hover:text-sky-800 hover:bg-slate-100 rounded-lg transition-all" title="Edit">
-                            <Edit size={18} />
-                          </button>
-                          <button onClick={() => archiveFaculty(faculty.id)} className="p-2 text-rose-600 hover:text-rose-800 hover:bg-slate-100 rounded-lg transition-all" title="Archive">
-                            <Folder size={18} />
-                          </button>
+                          {showArchivedFaculty ? (
+                            <button onClick={() => restoreFaculty(faculty.id)} className="p-2 text-emerald-600 hover:text-emerald-800 hover:bg-slate-100 rounded-lg transition-all" title="Restore">
+                              <Folder size={18} />
+                            </button>
+                          ) : (
+                            <>
+                              <button onClick={() => startEditFaculty(faculty.id)} className="p-2 text-sky-600 hover:text-sky-800 hover:bg-slate-100 rounded-lg transition-all" title="Edit">
+                                <Edit size={18} />
+                              </button>
+                              <button onClick={() => setFacultyToArchive(faculty)} className="p-2 text-rose-600 hover:text-rose-800 hover:bg-slate-100 rounded-lg transition-all" title="Archive">
+                                <Folder size={18} />
+                              </button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -559,72 +929,48 @@ const FacultyPages = () => {
                 </tbody>
               </table>
             </div>
-            {/* Archived Faculty Modal */}
-            {isArchiveOpenFaculty && (
-              <div className="fixed inset-0 z-[10000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setIsArchiveOpenFaculty(false)}>
-                <div className="bg-white w-full max-w-3xl rounded-2xl shadow-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
-                  <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                    <div>
-                      <h3 className="text-lg font-black text-slate-800">Archived Faculty</h3>
-                      <p className="text-sm text-slate-400">Faculty members that were archived</p>
-                    </div>
-                    <button className="text-slate-400 hover:text-slate-700 text-2xl" onClick={() => setIsArchiveOpenFaculty(false)}>&times;</button>
-                  </div>
-
-                  <div className="p-6">
-                    {isLoadingArchivedFaculty && <div className="text-sm text-slate-500">Loading archived faculty...</div>}
-                    {archiveFacultyError && <div className="text-sm text-rose-600">{archiveFacultyError}</div>}
-                    {!isLoadingArchivedFaculty && !archiveFacultyError && archivedFaculty.length === 0 && (
-                      <div className="text-sm text-slate-500">No archived faculty found.</div>
-                    )}
-
-                    {!isLoadingArchivedFaculty && archivedFaculty.length > 0 && (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left">
-                          <thead className="bg-slate-50 border-b border-slate-100">
-                            <tr>
-                              <th className="px-4 py-3 text-sm text-slate-500">Faculty ID</th>
-                              <th className="px-4 py-3 text-sm text-slate-500">Name</th>
-                              <th className="px-4 py-3 text-sm text-slate-500">Department</th>
-                              <th className="px-4 py-3 text-sm text-slate-500 text-center">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {archivedFaculty.map((f, i) => (
-                              <tr key={f.id || i} className="hover:bg-slate-50/80">
-                                <td className="px-4 py-3 text-xs font-mono text-slate-500">{f.id}</td>
-                                <td className="px-4 py-3 text-sm font-black text-slate-800">{f.name}</td>
-                                <td className="px-4 py-3 text-sm text-slate-600">{f.dept}</td>
-                                <td className="px-4 py-3 text-center">
-                                  <div className="flex items-center justify-center gap-2">
-                                    <button onClick={() => { setIsArchiveOpenFaculty(false); showFacultyDetails(f.id); }} className="px-3 py-1 bg-slate-100 rounded-lg text-sm font-semibold">View</button>
-                                    <button onClick={() => restoreFaculty(f.id)} className="px-3 py-1 bg-emerald-50 text-emerald-600 border border-emerald-100 rounded-lg text-sm font-semibold">Restore</button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-
-                    <div className="flex justify-end mt-4">
-                      <button className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm" onClick={() => setIsArchiveOpenFaculty(false)}>Close</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
+            {((showArchivedFaculty && isLoadingArchivedFaculty) || (!showArchivedFaculty && isLoading)) && (
+              <div className="p-6 text-sm text-slate-500">Loading faculty...</div>
             )}
-            {(isLoading || loadError || filteredFaculty.length === 0) && (
+            {showArchivedFaculty && archiveFacultyError && (
+              <div className="p-6 text-sm text-rose-600">{archiveFacultyError}</div>
+            )}
+            {!showArchivedFaculty && loadError && (
+              <div className="p-6 text-sm text-slate-500">{loadError}</div>
+            )}
+            {!isLoading && !isLoadingArchivedFaculty && !loadError && !archiveFacultyError && tableFaculty.length === 0 && (
               <div className="p-6 text-sm text-slate-500">
-                {isLoading && 'Loading faculty...'}
-                {!isLoading && loadError}
-                {!isLoading && !loadError && filteredFaculty.length === 0 && 'No faculty found.'}
+                {showArchivedFaculty ? 'No archived faculty found.' : 'No faculty found.'}
               </div>
             )}
           </div>
+          </div>
         </main>
       </div>
+
+      {facultyToArchive && (
+        <div className="fixed inset-0 z-[10000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setFacultyToArchive(null)}>
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-100">
+              <h3 className="text-lg font-black text-slate-800">Archive Faculty Member</h3>
+              <p className="text-sm text-slate-400 mt-1">This will move the faculty member to the archived section.</p>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-slate-700">
+                Are you sure you want to archive <span className="font-bold text-slate-900">{facultyToArchive.name}</span>?
+              </p>
+              <div className="flex items-center justify-end gap-3">
+                <button type="button" className="px-4 py-2 text-sm font-bold text-slate-500" onClick={() => setFacultyToArchive(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="px-4 py-2 text-sm font-bold bg-rose-600 text-white rounded-lg hover:bg-rose-700" onClick={() => archiveFaculty(facultyToArchive)}>
+                  Archive
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* INTEGRATED MODAL */}
       {isAddOpen && (
@@ -697,7 +1043,10 @@ const FacultyPages = () => {
                     name="contact_number"
                     value={formValues.contact_number}
                     onChange={handleInputChange}
-                    placeholder="+63 9XX XXX XXXX"
+                    placeholder="63XXXXXXXXXX"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength="11"
                     className="w-full mt-2 px-3 py-2 border border-slate-200 rounded-lg text-sm"
                   />
                 </div>
@@ -771,37 +1120,56 @@ const FacultyPages = () => {
                 <div className="text-4xl mb-4">📁</div>
                 <h4 className="text-lg font-semibold text-slate-700 mb-2">Upload CSV File</h4>
                 <p className="text-sm text-slate-500 mb-4">
-                  Select a CSV file containing faculty data. Required columns: email, firstname, lastname, employee_id
+                  Select a CSV file containing faculty data. Required columns: email, firstname, lastname
                 </p>
-                <input
-                  type="file"
-                  accept=".csv"
-                  onChange={(e) => {
-                    const file = e.target.files[0];
-                    if (file) {
+                <div className="flex items-center justify-center gap-3">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      const err = validateCsvFile(file);
+                      if (err) {
+                        setBulkImportResult({ success: false, message: err, errors: [] });
+                        e.target.value = '';
+                        return;
+                      }
                       handleBulkImport(file);
-                    }
-                  }}
-                  className="hidden"
-                  id="faculty-csv-upload"
-                  disabled={isBulkImporting}
-                />
-                <label
-                  htmlFor="faculty-csv-upload"
-                  className="inline-flex items-center px-4 py-2 bg-[#ffcc00] text-[#041c32] rounded-lg text-sm font-bold hover:bg-[#e6b800] cursor-pointer disabled:opacity-70"
-                >
-                  {isBulkImporting ? 'Importing...' : 'Choose CSV File'}
-                </label>
+                    }}
+                    className="hidden"
+                    id="faculty-csv-upload"
+                    disabled={isBulkImporting}
+                  />
+                  <label
+                    htmlFor="faculty-csv-upload"
+                    className="inline-flex items-center px-4 py-2 bg-[#ffcc00] text-[#041c32] rounded-lg text-sm font-bold hover:bg-[#e6b800] cursor-pointer disabled:opacity-70"
+                  >
+                    {isBulkImporting ? 'Importing...' : 'Choose CSV File'}
+                  </label>
+                  <button
+                    onClick={downloadCSVTemplate}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700"
+                  >
+                    <Download size={16} /> Download Template
+                  </button>
+                </div>
               </div>
 
               {/* CSV Format Guide */}
               <div className="bg-slate-50 rounded-lg p-4">
                 <h5 className="font-semibold text-slate-700 mb-2">CSV Format Requirements:</h5>
                 <div className="text-sm text-slate-600 space-y-1">
-                  <div><strong>Required columns:</strong> email, firstname, lastname, employee_id</div>
-                  <div><strong>Optional columns:</strong> department, position</div>
-                  <div><strong>Example:</strong> email,firstname,lastname,employee_id,department,position</div>
-                  <div><strong>Sample row:</strong> jane.smith@upang.edu.ph,Jane,,Smith,FAC001,Computer Science,Assistant Professor</div>
+                  <div><strong>Required columns:</strong> email, firstname, lastname</div>
+                  <div><strong>Optional columns:</strong> department, middlename, contact_number, birthdate</div>
+                  <div className="mt-3 p-3 bg-white rounded border border-slate-200">
+                    <div className="font-mono text-xs">
+                      <div className="font-semibold mb-1">Sample CSV:</div>
+                      <div>email,firstname,middlename,lastname,department,contact_number,birthdate</div>
+                      <div>john.doe@upang.edu.ph,John,M,Doe,CITE,639123456789,1985-05-15</div>
+                      <div>jane.smith@upang.edu.ph,Jane,L,Smith,CITE,639987654321,1990-08-22</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-500"><strong>Note:</strong> Birthdate format must be YYYY-MM-DD. Email must be unique for each faculty member.</div>
                 </div>
               </div>
 
@@ -839,18 +1207,7 @@ const FacultyPages = () => {
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  className="px-4 py-2 text-sm font-bold text-slate-500"
-                  onClick={() => {
-                    setIsBulkImportOpen(false);
-                    setBulkImportResult(null);
-                  }}
-                >
-                  Close
-                </button>
-              </div>
+             
             </div>
           </div>
         </div>
@@ -858,21 +1215,87 @@ const FacultyPages = () => {
 
       {selectedFaculty && (
         <div className="fixed inset-0 z-[10000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setSelectedFaculty(null)}>
-          <div className="bg-white w-full max-w-lg rounded-2xl shadow-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white w-full max-w-2xl rounded-2xl shadow-xl overflow-hidden max-h-[88vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-black text-slate-800">Faculty Details</h3>
-                <p className="text-sm text-slate-400">Details for {selectedFaculty.firstname} {selectedFaculty.lastname}</p>
+                <p className="text-sm text-slate-400">Complete information and evaluation metrics</p>
               </div>
               <button className="text-slate-400 hover:text-slate-700 text-2xl" onClick={() => setSelectedFaculty(null)}>&times;</button>
             </div>
-            <div className="p-6 space-y-3">
-              <div><strong>Email:</strong> {selectedFaculty.email}</div>
-              <div><strong>Name:</strong> {selectedFaculty.firstname} {selectedFaculty.middlename} {selectedFaculty.lastname}</div>
-              <div><strong>Department:</strong> {selectedFaculty.department}</div>
-              <div><strong>Contact Number:</strong> {selectedFaculty.contact_number}</div>
-              <div><strong>Birthdate:</strong> {selectedFaculty.birthdate}</div>
-              <div className="flex justify-end pt-4">
+            <div className="p-5 space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wide">Faculty ID</p>
+                  <p className="text-xl font-bold text-slate-900">{selectedFaculty.faculty_id || selectedFaculty.id || selectedFaculty.pk || 'N/A'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wide">Name</p>
+                  <p className="text-xl font-bold text-slate-900">{[selectedFaculty.title, selectedFaculty.firstname, selectedFaculty.lastname].filter(Boolean).join(' ')}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wide">Title</p>
+                  <p className="text-lg font-semibold text-slate-900">{selectedFaculty.title || 'Professor'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wide">Department</p>
+                  <p className="text-lg font-semibold text-slate-900">{selectedFaculty.department || 'N/A'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wide">Specialization</p>
+                  <p className="text-lg font-semibold text-slate-900">{selectedFaculty.specialization || selectedFaculty.department || 'N/A'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wide">Email</p>
+                  <p className="text-lg font-semibold text-slate-900 break-all">{selectedFaculty.email || 'N/A'}</p>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-xl font-bold text-slate-900 mb-3">Teaching Statistics</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="rounded-2xl border border-slate-200 px-4 py-4 text-center">
+                    <p className="text-3xl font-black text-slate-900">{selectedFaculty.metrics?.modules ?? 0}</p>
+                    <p className="text-slate-500 text-sm mt-1">Modules</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 px-4 py-4 text-center">
+                    <p className="text-3xl font-black text-blue-600">{selectedFaculty.metrics?.students ?? 0}</p>
+                    <p className="text-slate-500 text-sm mt-1">Students</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 px-4 py-4 text-center">
+                    <p className="text-3xl font-black text-emerald-600">{selectedFaculty.metrics?.evaluations ?? 0}</p>
+                    <p className="text-slate-500 text-sm mt-1">Evaluations</p>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-xl font-bold text-slate-900 mb-3">Overall Rating</h4>
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 flex items-center justify-between">
+                  <p className="text-sm text-slate-500">Calculated from all rated items (normalized to 5-point)</p>
+                  <div className="text-right">
+                    <p className="text-3xl font-black text-slate-900">{Number(selectedFaculty.metrics?.rating || 0).toFixed(1)}</p>
+                    <p className="text-sm text-slate-500">average rating</p>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-xl font-bold text-slate-900 mb-3">Rating Distribution</h4>
+                <div className="space-y-3">
+                  {(selectedFaculty.metrics?.ratingDistribution || []).map((item) => (
+                    <div key={item.key} className="grid grid-cols-[115px_1fr_44px] gap-3 items-center">
+                      <span className="text-xs font-semibold text-slate-700">{item.label}</span>
+                      <div className="w-full h-3 rounded-full bg-slate-200 overflow-hidden">
+                        <div className={`h-full rounded-full ${item.color}`} style={{ width: `${item.percent}%` }} />
+                      </div>
+                      <span className="text-sm text-slate-500 text-right">{item.percent}%</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
                 <button className="px-4 py-2 bg-[#1f474d] text-white rounded-lg" onClick={() => { setSelectedFaculty(null); }}>Close</button>
               </div>
             </div>

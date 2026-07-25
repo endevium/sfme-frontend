@@ -1,5 +1,4 @@
-import React, { useEffect, useState } from 'react';
-import Header from '../../components/Header';
+import React, { useEffect, useMemo, useState } from 'react';
 import Sidebar from '../../components/Sidebar';
 import { 
   Users, 
@@ -11,22 +10,35 @@ import {
   Edit,
   Folder,
 } from 'lucide-react';
+import { getToken } from '../../utils/auth';
+
+const normalizePersonStatus = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'archived' ? 'Archived' : 'Active';
+};
 
 const StudentsManagement = () => {
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+  const MAX_CSV_SIZE = 2 * 1024 * 1024;
 
   const [studentData, setStudentData] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
   const [isBulkImporting, setIsBulkImporting] = useState(false);
   const [bulkImportResult, setBulkImportResult] = useState(null);
 
-  const [isArchiveOpen, setIsArchiveOpen] = useState(false);
+  const [showArchivedStudents, setShowArchivedStudents] = useState(false);
   const [archivedStudents, setArchivedStudents] = useState([]);
   const [isLoadingArchived, setIsLoadingArchived] = useState(false);
   const [archiveError, setArchiveError] = useState('');
+  const [studentToArchive, setStudentToArchive] = useState(null);
+
+  const [blocks, setBlocks] = useState([]);
+  const [isLoadingBlocks, setIsLoadingBlocks] = useState(false);
+  const [_blocksError, setBlocksError] = useState('');
 
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -47,11 +59,9 @@ const StudentsManagement = () => {
     year_level: '',
     birthdate: '',
     enrolled_subjects: [],
-    subject_code_input: '',
-    subject_description_input: '',
-    subject_instructor_input: '',
     block_section: '',
   });
+
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -77,9 +87,6 @@ const StudentsManagement = () => {
       year_level: '',
       birthdate: '',
       enrolled_subjects: [],
-      subject_code_input: '',
-      subject_description_input: '',
-      subject_instructor_input: '',
       block_section: '',
     });
     setErrorMessage('');
@@ -107,9 +114,6 @@ const StudentsManagement = () => {
       if (!value) error = 'Year level is required.';
     } else if (name === 'block_section') {
       if (!value) error = 'Block / Section is required.';
-    } else if (name === 'enrolled_subjects') {
-      const list = Array.isArray(formValues.enrolled_subjects) ? formValues.enrolled_subjects : [];
-      if (list.length === 0) error = 'Please add at least one enrolled subject.';
     }
 
     setFormErrors((prev) => ({ ...prev, [name]: error }));
@@ -147,43 +151,8 @@ const StudentsManagement = () => {
     // block / section
     if (!String(formValues.block_section || '').trim()) errors.block_section = 'Block / Section is required.';
 
-    // enrolled subjects
-    if (!Array.isArray(formValues.enrolled_subjects) || formValues.enrolled_subjects.length === 0) {
-      errors.enrolled_subjects = 'Please add at least one enrolled subject.';
-    }
-
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
-  };
-
-  const addSubject = () => {
-    const code = String(formValues.subject_code_input || '').trim();
-    const desc = String(formValues.subject_description_input || '').trim();
-    const inst = String(formValues.subject_instructor_input || '').trim();
-    if (!code || !desc || !inst) return;
-    setFormValues((prev) => ({
-      ...prev,
-      enrolled_subjects: [...(prev.enrolled_subjects || []), { code, description: desc, instructor_name: inst }],
-      subject_code_input: '',
-      subject_description_input: '',
-      subject_instructor_input: '',
-    }));
-    // clear enrolled_subjects error when a subject is added
-    setFormErrors((prev) => ({ ...prev, enrolled_subjects: undefined }));
-  };
-
-  const removeSubject = (index) => {
-    setFormValues((prev) => ({
-      ...prev,
-      enrolled_subjects: prev.enrolled_subjects.filter((_, i) => i !== index),
-    }));
-    // if removing leaves no subjects, set an error
-    setTimeout(() => {
-      setFormErrors((prev) => {
-        const remaining = (formValues.enrolled_subjects || []).filter((_, i) => i !== index);
-        return { ...prev, enrolled_subjects: remaining.length === 0 ? 'Please add at least one enrolled subject.' : undefined };
-      });
-    }, 0);
   };
 
   const closeModal = () => {
@@ -213,27 +182,38 @@ const StudentsManagement = () => {
       : student.enrolled_subject || student.subject || 'N/A',
     block: student.block_section || student.block || 'N/A',
     year: formatYearLabel(student.year_level),
-    modules: 0,
+    modules: (function countEnrolledSubjects(s) {
+      const value = s || student.enrolled_subjects || student.enrolled_subject || student.subject;
+      if (!value) return 0;
+      if (Array.isArray(value)) return value.length;
+      if (typeof value === 'string') return value.split(/;|,/).map(x => x.trim()).filter(Boolean).length;
+      return 0;
+    })(student.enrolled_subjects),
     completed: 0,
     pending: 0,
-    status: 'Active',
+    status: normalizePersonStatus(student.status),
   });
+
+  const validateCsvFile = (file) => {
+    if (!file) return 'No file selected.';
+    if (!String(file.name || '').toLowerCase().endsWith('.csv')) return 'Only .csv files are allowed.';
+    if (file.size > MAX_CSV_SIZE) return 'File is too large (max 2MB).';
+    const allowedTypes = ['text/csv', 'application/csv', 'application/vnd.ms-excel'];
+    if (file.type && !allowedTypes.includes(file.type)) return `Invalid file type: ${file.type}. Please upload a CSV.`;
+    return null;
+  };
 
   // Helper function to create audit log entries
   const createAuditLog = async (action, message) => {
     try {
-      const auditData = {
-        action: action,
-        message: message,
-        category: 'USER MANAGEMENT',
-        status: 'Success',
-      };
+      const token = getToken();
+      const auditData = { action, message, category: 'USER MANAGEMENT', status: 'Success' };
 
       await fetch(`${API_BASE_URL}/audit-logs/`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(auditData),
       });
@@ -247,15 +227,24 @@ const StudentsManagement = () => {
     setLoadError('');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/students/`);
+      const token = getToken();
+      const response = await fetch(`${API_BASE_URL}/students/`, {
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+      });
+
       const data = await response.json();
       if (!response.ok) {
-        setLoadError('Unable to load students.');
+        setLoadError(data?.detail || 'Unable to load students.');
         return;
       }
 
       const list = Array.isArray(data) ? data : [];
-      setStudentData(list.map(mapStudent));
+      const mapped = list.map(mapStudent);
+      setStudentData(mapped);
+      // compute completion stats after setting base student list
+      computeCompletionStats(mapped);
     } catch {
       setLoadError('Unable to reach the server. Please try again.');
     } finally {
@@ -263,12 +252,159 @@ const StudentsManagement = () => {
     }
   };
 
+  const computeCompletionStats = async (studentsList) => {
+    try {
+      const token = getToken();
+      const headers = { ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+
+      // fetch forms/submissions and all classrooms (dept head can access by department)
+      const [mefRes, iefRes, subsRes, classroomsRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/module-evaluation-forms/`, { headers }),
+        fetch(`${API_BASE_URL}/instructor-evaluation-forms/`, { headers }),
+        fetch(`${API_BASE_URL}/feedback/submissions/`, { headers }),
+        fetch(`${API_BASE_URL}/classrooms/`, { headers }),
+      ]);
+
+      const mefList = mefRes.ok ? await mefRes.json().catch(() => []) : [];
+      const iefList = iefRes.ok ? await iefRes.json().catch(() => []) : [];
+      const subsList = subsRes.ok ? await subsRes.json().catch(() => []) : [];
+      const classroomsPayload = classroomsRes.ok ? await classroomsRes.json().catch(() => []) : [];
+      const classroomsList = Array.isArray(classroomsPayload)
+        ? classroomsPayload
+        : classroomsPayload?.results || [];
+
+      // Count approved classroom memberships per student.
+      // This becomes the source of truth for the "Modules" column.
+      const classroomStudentResponses = await Promise.all(
+        classroomsList.map(async (classroom) => {
+          const cid = classroom?.id;
+          if (!cid) return null;
+          try {
+            const res = await fetch(`${API_BASE_URL}/classrooms/${cid}/students/`, { headers });
+            if (!res.ok) return null;
+            return await res.json().catch(() => null);
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      const modulesByStudent = new Map();
+      for (const classroomData of classroomStudentResponses) {
+        if (!classroomData) continue;
+        const studentsInClass = Array.isArray(classroomData?.students) ? classroomData.students : [];
+        for (const st of studentsInClass) {
+          const sid = String(st?.student_id || st?.id || '');
+          if (!sid) continue;
+          modulesByStudent.set(sid, (modulesByStudent.get(sid) || 0) + 1);
+        }
+      }
+
+      const mefById = new Map();
+      (Array.isArray(mefList) ? mefList : mefList.results || []).forEach(f => mefById.set(String(f.id), f));
+      const iefById = new Map();
+      (Array.isArray(iefList) ? iefList : iefList.results || []).forEach(f => iefById.set(String(f.id), f));
+
+      // studentId -> classroomId -> { module: bool, instructor: bool }
+      const studentMap = new Map();
+
+      const responses = Array.isArray(subsList) ? subsList : subsList.results || [];
+      for (const r of responses) {
+        const studentId = r?.student || r?.student_id || (r.student && (r.student.id || r.student.pk));
+        if (!studentId) continue;
+
+        // resolve form id
+        const formId = r.form_object_id ?? r.form_id ?? (r.form && (r.form.id || r.form)) ?? null;
+        if (!formId) continue;
+        const fid = String(formId);
+
+        let classroomId = null;
+        let type = null;
+        if (mefById.has(fid)) {
+          type = 'module';
+          classroomId = mefById.get(fid)?.classroom ?? mefById.get(fid)?.classroom_id ?? null;
+        } else if (iefById.has(fid)) {
+          type = 'instructor';
+          classroomId = iefById.get(fid)?.classroom ?? iefById.get(fid)?.classroom_id ?? null;
+        } else if (r.form && typeof r.form === 'object' && (r.form.classroom || r.form.classroom_id)) {
+          classroomId = r.form.classroom ?? r.form.classroom_id ?? null;
+          // best-effort: if title/instructor present assume instructor form else module
+          type = r.form.instructor_name ? 'instructor' : 'module';
+        }
+        if (!classroomId) continue;
+
+        const sid = String(studentId);
+        if (!studentMap.has(sid)) studentMap.set(sid, new Map());
+        const clsMap = studentMap.get(sid);
+        const cid = String(classroomId);
+        if (!clsMap.has(cid)) clsMap.set(cid, { module: false, instructor: false });
+        const cur = clsMap.get(cid);
+        if (type === 'module') cur.module = true;
+        if (type === 'instructor') cur.instructor = true;
+        clsMap.set(cid, cur);
+      }
+
+      // compute completed/pending per student
+      const updated = studentsList.map(s => {
+        const sid = String(s.pk || s.id || s.student_number || '');
+        const clsMap = studentMap.get(sid) || new Map();
+        let completedCount = 0;
+        for (const [, val] of clsMap.entries()) {
+          // Count a completed module when the module evaluation has been submitted.
+          // Previously this required both module && instructor to be true,
+          // which left records as pending if only the module form was completed.
+          if (val.module) completedCount += 1;
+        }
+        const totalModules = Number(modulesByStudent.get(sid) || 0);
+        const pendingCount = Math.max(0, totalModules - completedCount);
+        return {
+          ...s,
+          modules: totalModules,
+          completed: completedCount,
+          pending: pendingCount,
+        };
+      });
+
+      setStudentData(updated);
+    } catch (err) {
+      console.error('Failed to compute completion stats', err);
+    }
+  };
+
+  const fetchBlocks = async () => {
+    setIsLoadingBlocks(true);
+    setBlocksError('');
+    try {
+      const token = getToken();
+      const res = await fetch(`${API_BASE_URL}/blocks/`, {
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+      });
+      if (!res.ok) {
+        setBlocks([]);
+        setBlocksError('Unable to load blocks.');
+        return;
+      }
+      const data = await res.json().catch(() => []);
+      setBlocks(Array.isArray(data) ? data : data?.results || []);
+    } catch {
+      setBlocksError('Unable to reach server for blocks.');
+      setBlocks([]);
+    } finally {
+      setIsLoadingBlocks(false);
+    }
+  };
+
   const fetchArchivedStudents = async () => {
     setIsLoadingArchived(true);
     setArchiveError('');
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/students/archived/`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` },
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
       });
       if (!res.ok) {
         setArchiveError('Unable to load archived students.');
@@ -277,8 +413,10 @@ const StudentsManagement = () => {
       }
       const data = await res.json();
       const list = Array.isArray(data) ? data : [];
-      setArchivedStudents(list.map(mapStudent));
-    } catch (e) {
+      const mapped = list.map(mapStudent);
+      setArchivedStudents(mapped);
+      computeCompletionStats(mapped);
+    } catch {
       setArchiveError('Unable to reach the server.');
       setArchivedStudents([]);
     } finally {
@@ -290,13 +428,14 @@ const StudentsManagement = () => {
     const ok = window.confirm('Restore this student? This will make them active again.');
     if (!ok) return;
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/students/${studentId}/`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ archived: false }),
+        body: JSON.stringify({ status: 'active' }),
       });
       if (!res.ok) {
         setArchiveError('Unable to restore student.');
@@ -310,19 +449,45 @@ const StudentsManagement = () => {
       // refresh lists
       fetchStudents();
       fetchArchivedStudents();
-    } catch (e) {
+    } catch {
       setArchiveError('Unable to reach the server.');
     }
   };
 
   useEffect(() => {
     fetchStudents();
+    fetchBlocks();
+    // Intentionally load once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const normalizeYearForCompare = (val) => {
+    if (val == null) return '';
+    const s = String(val).trim();
+    const n = parseInt(s, 10);
+    if (!Number.isNaN(n)) return String(n);
+    const m = s.match(/\d+/);
+    return m ? String(parseInt(m[0], 10)) : '';
+  };
+
+  const availableBlocks = useMemo(() => {
+    const target = normalizeYearForCompare(formValues.year_level);
+    if (!target) return [];
+    return blocks.filter((b) => normalizeYearForCompare(b.year_level) === target);
+  }, [blocks, formValues.year_level]);
+
+  const availableBlockNames = useMemo(() => availableBlocks.map((b) => b.block_name), [availableBlocks]);
+
+  useEffect(() => {
+    if (formValues.block_section && !availableBlockNames.includes(formValues.block_section)) {
+      setFormValues((prev) => ({ ...prev, block_section: '' }));
+    }
+    // only react to changes in available blocks
+  }, [availableBlockNames, formValues.block_section]);
 
   const handleAddStudent = async (e) => {
     e.preventDefault();
     setErrorMessage('');
-    // validate and either create or update
     if (!validateForm()) {
       setErrorMessage('Please fix the errors in the form.');
       return;
@@ -339,11 +504,12 @@ const StudentsManagement = () => {
       const url = isEditing && editingId ? `${API_BASE_URL}/students/${editingId}/` : `${API_BASE_URL}/students/`;
       const method = isEditing && editingId ? 'PATCH' : 'POST';
 
+      const token = getToken();
       const response = await fetch(url, {
         method,
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(payload),
       });
@@ -404,13 +570,23 @@ const StudentsManagement = () => {
     setBulkImportResult(null);
 
     try {
+      const token = getToken();
       const formData = new FormData();
       formData.append('file', file);
+      // Debug: log file and FormData entries to ensure browser includes the file
+      try {
+        console.info('Bulk import - file:', { name: file.name, size: file.size, type: file.type });
+        for (const pair of formData.entries()) {
+          console.info('FormData entry:', pair[0], pair[1]);
+        }
+      } catch (e) {
+        console.warn('Bulk import debug log failed', e);
+      }
 
       const response = await fetch(`${API_BASE_URL}/students/bulk-import/`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: formData,
       });
@@ -418,10 +594,22 @@ const StudentsManagement = () => {
       const data = await response.json();
 
       if (!response.ok) {
+        // Better error messaging with additional details
+        let errorMsg = data?.detail || 'Bulk import failed';
+        const errorDetails = [];
+        
+        // Add missing/found columns info if available
+        if (data?.missing && data.missing.length > 0) {
+          errorDetails.push(`Missing: ${data.missing.join(', ')}`);
+        }
+        if (data?.found && data.found.length > 0) {
+          errorDetails.push(`Found: ${data.found.join(', ')}`);
+        }
+        
         setBulkImportResult({
           success: false,
-          message: data?.detail || 'Bulk import failed',
-          errors: data?.errors || []
+          message: errorMsg,
+          errors: data?.errors || errorDetails
         });
         return;
       }
@@ -447,10 +635,72 @@ const StudentsManagement = () => {
     }
   };
 
+  const downloadCSVTemplate = () => {
+    const csvContent = 'email,firstname,middlename,lastname,student_id,department,year_level,course,block_section,birthdate,enrolled_subjects\njohn.doe@upang.edu.ph,John,M,Doe,2021-0001,CITE,1,BSIT,A1,2000-05-15,"ITE293|Systems Administration|Josephine Cruz;CS101|Programming Fundamentals|John Smith"\njane.smith@upang.edu.ph,Jane,L,Smith,2021-0002,CITE,2,BSCS,B2,1999-08-22,"MATH201|Calculus|Maria Garcia;PHYS202|Physics|Robert Lee"';
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'student_import_template.csv';
+    link.click();
+  };
+
+  // Export current student table to CSV
+  const exportToCSV = (rows, headers, filename = 'student-list.csv') => {
+    if (!rows || rows.length === 0) {
+      window.alert('No records to export.');
+      return;
+    }
+
+    const escape = (value) => {
+      if (value === null || value === undefined) return '';
+      const s = String(value).replace(/\r?\n/g, ' ');
+      if (s.includes('"')) return '"' + s.replace(/"/g, '""') + '"';
+      if (s.includes(',') || s.includes('\n')) return '"' + s + '"';
+      return s;
+    };
+
+    const lines = [headers.join(',')];
+    for (const r of rows) {
+      const row = [
+        r.id || '',
+        r.name || '',
+        r.program || '',
+        r.block || '',
+        r.year || '',
+        r.modules ?? '',
+        r.completed ?? '',
+        r.pending ?? '',
+        r.status || '',
+      ].map(escape).join(',');
+      lines.push(row);
+    }
+
+    const csv = lines.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportStudents = () => {
+    const rows = filteredStudents;
+    const headers = ['Student ID','Name','Program','Block','Year','Modules','Completed','Pending','Status'];
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    exportToCSV(rows, headers, `student-list_${stamp}.csv`);
+  };
+
   const showStudentDetails = async (studentId) => {
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/students/${studentId}/`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` },
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
       });
       if (!res.ok) {
         setErrorMessage('Unable to load student details.');
@@ -466,8 +716,11 @@ const StudentsManagement = () => {
 
   const startEditStudent = async (studentId) => {
     try {
+      const token = getToken();
       const res = await fetch(`${API_BASE_URL}/students/${studentId}/`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('authToken')}` },
+        headers: {
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
       });
       if (!res.ok) {
         setErrorMessage('Unable to load student for editing.');
@@ -497,18 +750,17 @@ const StudentsManagement = () => {
     }
   };
 
-  const archiveStudent = async (studentId) => {
-    const ok = window.confirm('Archive this student? This will remove them from the active list.');
-    if (!ok) return;
+  const archiveStudent = async (student) => {
+    if (!student?.pk) return;
     try {
-      // PATCH to mark archived=true (soft-delete)
-      const res = await fetch(`${API_BASE_URL}/students/${studentId}/`, {
+      const token = getToken();
+      const res = await fetch(`${API_BASE_URL}/students/${student.pk}/`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('authToken')}`,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ archived: true }),
+        body: JSON.stringify({ status: 'archived' }),
       });
       if (!res.ok) {
         setErrorMessage('Unable to archive student.');
@@ -518,14 +770,28 @@ const StudentsManagement = () => {
       // Log the archive action
       await createAuditLog(
         'Archived Student',
-        `Archived student: ${studentData.firstname || ''} ${studentData.lastname || ''} (${studentData.student_number || studentId})`
+        `Archived student: ${studentData.firstname || ''} ${studentData.lastname || ''} (${studentData.student_number || student.pk})`
       );
 
-      setStudentData((prev) => prev.filter((s) => s.pk !== studentId));
-    } catch (e) {
+      setStudentData((prev) => prev.filter((s) => s.pk !== student.pk));
+      setArchivedStudents((prev) => [mapStudent(studentData), ...prev.filter((s) => s.pk !== student.pk)]);
+      setStudentToArchive(null);
+    } catch {
       setErrorMessage('Unable to reach the server.');
     }
   };
+
+  const filteredStudents = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    const source = showArchivedStudents ? archivedStudents : studentData;
+    if (!query) return source;
+    return source.filter((student) => (
+      String(student.id || '').toLowerCase().includes(query) ||
+      String(student.name || '').toLowerCase().includes(query) ||
+      String(student.program || '').toLowerCase().includes(query) ||
+      String(student.block || '').toLowerCase().includes(query)
+    ));
+  }, [searchQuery, studentData, archivedStudents, showArchivedStudents]);
 
   return (
     <div className="min-h-screen w-full font-['Optima-Medium','Optima','Candara','sans-serif'] text-slate-800 bg-slate-50 flex flex-col">      
@@ -533,6 +799,7 @@ const StudentsManagement = () => {
         <Sidebar role="depthead" activeItem="students" />
         
         <main className="flex-1 p-8 overflow-y-auto">
+          <div className="max-w-7xl mx-auto w-full">
           {/* Page Title */}
           <div className="mb-8">
             <h1 className="text-4xl font-bold text-[#1f2937]">Students Management</h1>
@@ -585,29 +852,33 @@ const StudentsManagement = () => {
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-center gap-4">
               <div>
-                <h2 className="text-xl font-bold text-slate-800">All Students</h2>
-                <p className="text-slate-400 text-sm">Complete list of enrolled students</p>
+                <h2 className="text-xl font-bold text-slate-800">{showArchivedStudents ? 'Archived Students' : 'All Students'}</h2>
+                <p className="text-slate-400 text-sm">{showArchivedStudents ? 'Archived student records' : 'Complete list of enrolled students'}</p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <button
-                  className="flex items-center gap-2 px-4 py-2 bg-[#1f474d] text-white rounded-lg text-sm font-bold hover:bg-[#18393e] transition-all"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#1f474d] text-white rounded-lg text-sm font-semibold hover:bg-[#18393e] transition-all"
                   onClick={() => { setIsEditing(false); setEditingId(null); resetForm(); setIsAddOpen(true); }}
                 >
                   + Add Student
                 </button>
                 <button
                   className="flex items-center gap-2 px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-sm font-bold hover:bg-slate-200 transition-all"
-                  onClick={() => { setIsArchiveOpen(true); fetchArchivedStudents(); }}
+                  onClick={() => {
+                    const nextValue = !showArchivedStudents;
+                    setShowArchivedStudents(nextValue);
+                    if (nextValue) fetchArchivedStudents();
+                  }}
                 >
-                  <Folder size={16} /> Archived Students
+                  <Folder size={16} /> {showArchivedStudents ? 'Back To Active Students' : 'Archived Students'}
                 </button>
                 <button
-                  className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700 transition-all"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#1f474d] text-white rounded-lg text-sm font-semibold hover:bg-[#18393e] transition-all"
                   onClick={() => setIsBulkImportOpen(true)}
                 >
                   📁 Bulk Import
                 </button>
-                <button className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all">
+                <button onClick={handleExportStudents} className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-all">
                   <Download size={16} /> Export List
                 </button>
               </div>
@@ -619,6 +890,8 @@ const StudentsManagement = () => {
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                 <input 
                   type="text" 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search by name, student ID, or program..." 
                   className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1f474d]/20 transition-all bg-white"
                 />
@@ -633,7 +906,6 @@ const StudentsManagement = () => {
                     <th className="px-6 py-4 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Student ID</th>
                     <th className="px-6 py-4 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Name</th>
                     <th className="px-6 py-4 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Program</th>
-                    <th className="px-6 py-4 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Subjects</th>
                     <th className="px-6 py-4 text-[11px] font-bold text-slate-400 uppercase tracking-widest text-center">Block</th>
                     <th className="px-6 py-4 text-[11px] font-bold text-slate-400 uppercase tracking-widest text-center">Year</th>
                     <th className="px-3 py-3 text-[11px] font-bold text-slate-400 uppercase tracking-widest text-center">Modules</th>
@@ -644,19 +916,18 @@ const StudentsManagement = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {studentData.map((student, idx) => (
+                  {filteredStudents.map((student, idx) => (
                     <tr key={student.pk || idx} className="hover:bg-slate-50/80 transition-colors">
                       <td className="px-6 py-4 text-xs font-mono text-slate-500">{student.id}</td>
                       <td className="px-6 py-4 text-sm font-black text-slate-800">{student.name}</td>
                       <td className="px-6 py-4 text-sm text-slate-600 font-medium">{student.program}</td>
-                      <td className="px-6 py-4 text-sm text-slate-600 font-medium">{student.subject}</td>
                       <td className="px-6 py-4 text-sm text-slate-600 text-center font-medium">{student.block}</td>
                       <td className="px-6 py-4 text-sm text-slate-600 text-center font-bold">{student.year}</td>
                       <td className="px-3 py-3 text-sm text-slate-600 text-center font-bold">{student.modules}</td>
                       <td className="px-3 py-3 text-sm text-emerald-600 text-center font-black">{student.completed}</td>
                       <td className="px-3 py-3 text-sm text-amber-500 text-center font-black">{student.pending}</td>
                       <td className="px-6 py-4">
-                        <span className="px-3 py-1 bg-emerald-50 text-emerald-600 border border-emerald-100 text-[10px] font-black uppercase rounded-lg tracking-wider">
+                        <span className={`px-3 py-1 border text-[10px] font-black uppercase rounded-lg tracking-wider ${student.status === 'Archived' ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}`}>
                           {student.status}
                         </span>
                       </td>
@@ -665,12 +936,20 @@ const StudentsManagement = () => {
                           <button onClick={() => showStudentDetails(student.pk)} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all" title="View">
                             <Eye size={18} />
                           </button>
-                          <button onClick={() => startEditStudent(student.pk)} className="p-2 text-sky-600 hover:text-sky-800 hover:bg-slate-100 rounded-lg transition-all" title="Edit">
-                            <Edit size={18} />
-                          </button>
-                          <button onClick={() => archiveStudent(student.pk)} className="p-2 text-rose-600 hover:text-rose-800 hover:bg-slate-100 rounded-lg transition-all" title="Archive">
-                            <Folder size={18} />
-                          </button>
+                          {showArchivedStudents ? (
+                            <button onClick={() => restoreStudent(student.pk)} className="p-2 text-emerald-600 hover:text-emerald-800 hover:bg-slate-100 rounded-lg transition-all" title="Restore">
+                              <Folder size={18} />
+                            </button>
+                          ) : (
+                            <>
+                              <button onClick={() => startEditStudent(student.pk)} className="p-2 text-sky-600 hover:text-sky-800 hover:bg-slate-100 rounded-lg transition-all" title="Edit">
+                                <Edit size={18} />
+                              </button>
+                              <button onClick={() => setStudentToArchive(student)} className="p-2 text-rose-600 hover:text-rose-800 hover:bg-slate-100 rounded-lg transition-all" title="Archive">
+                                <Folder size={18} />
+                              </button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -678,13 +957,21 @@ const StudentsManagement = () => {
                 </tbody>
               </table>
             </div>
-            {(isLoading || loadError || studentData.length === 0) && (
+            {((showArchivedStudents && isLoadingArchived) || (!showArchivedStudents && isLoading)) && (
+              <div className="p-6 text-sm text-slate-500">Loading students...</div>
+            )}
+            {showArchivedStudents && archiveError && (
+              <div className="p-6 text-sm text-rose-600">{archiveError}</div>
+            )}
+            {!showArchivedStudents && loadError && (
+              <div className="p-6 text-sm text-slate-500">{loadError}</div>
+            )}
+            {!isLoading && !isLoadingArchived && !loadError && !archiveError && filteredStudents.length === 0 && (
               <div className="p-6 text-sm text-slate-500">
-                {isLoading && 'Loading students...'}
-                {!isLoading && loadError}
-                {!isLoading && !loadError && studentData.length === 0 && 'No students found.'}
+                {showArchivedStudents ? 'No archived students found.' : 'No students found.'}
               </div>
             )}
+          </div>
           </div>
         </main>
       </div>
@@ -799,60 +1086,6 @@ const StudentsManagement = () => {
                     disabled
                   />
                 </div>
-                <div className="md:col-span-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-500">Enrolled Subjects</label>
-                  <div className="flex gap-2 mt-2">
-                    <input
-                      name="subject_code_input"
-                      value={formValues.subject_code_input}
-                      onChange={handleInputChange}
-                      placeholder="Subject Code (e.g., COMP101)"
-                      className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
-                    />
-                    <input
-                      name="subject_description_input"
-                      value={formValues.subject_description_input}
-                      onChange={handleInputChange}
-                      placeholder="Subject Description"
-                      className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
-                    />
-                    <input
-                     name="subject_instructor_input"
-                     value={formValues.subject_instructor_input}
-                     onChange={handleInputChange}
-                     placeholder="Instructor Name"
-                     className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
-                   />
-                    <button
-                      type="button"
-                      onClick={addSubject}
-                      className="px-4 py-2 bg-emerald-600 text-white rounded-lg font-bold hover:bg-emerald-700"
-                    >
-                      +
-                    </button>
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {(formValues.enrolled_subjects || []).map((s, i) => (
-                      <div key={i} className="px-3 py-1 bg-slate-100 rounded-full flex items-center gap-2 text-sm">
-                        <span>{s.code} - {s.description}</span>
-                        <button type="button" onClick={() => removeSubject(i)} className="text-rose-600 font-bold">×</button>
-                      </div>
-                    ))}
-                  </div>
-                  {formErrors.enrolled_subjects && <div className="text-rose-600 text-sm mt-2">{formErrors.enrolled_subjects}</div>}
-                </div>
-                <div>
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-500">Block / Section</label>
-                  <input
-                    name="block_section"
-                    value={formValues.block_section}
-                    onChange={handleInputChange}
-                    onBlur={() => validateField('block_section')}
-                    placeholder="e.g., A1, B2"
-                    className={`w-full mt-2 px-3 py-2 rounded-lg text-sm border ${formErrors.block_section ? 'border-rose-500 ring-rose-100 bg-rose-50' : 'border-slate-200 bg-white'}`}
-                  />
-                  {formErrors.block_section && <div className="text-rose-600 text-sm mt-1">{formErrors.block_section}</div>}
-                </div>
                 <div>
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-500">Year Level</label>
                   <select
@@ -869,6 +1102,28 @@ const StudentsManagement = () => {
                     <option value="4">4th Year</option>
                     <option value="5">5th Year</option>
                   </select>
+                </div>
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-slate-500">Block / Section</label>
+                  <div>
+                    <select
+                      name="block_section"
+                      value={formValues.block_section}
+                      onChange={handleInputChange}
+                      onBlur={() => validateField('block_section')}
+                      className={`w-full mt-2 px-3 py-2 rounded-lg text-sm border ${formErrors.block_section ? 'border-rose-500 ring-rose-100 bg-rose-50' : 'border-slate-200 bg-white'}`}
+                    >
+                      <option value="">Select block/section</option>
+                      {availableBlocks.length === 0 ? (
+                        <option value="" disabled>{isLoadingBlocks ? 'Loading blocks...' : 'No blocks for selected year'}</option>
+                      ) : (
+                        availableBlocks.map((b) => (
+                          <option key={b.id || b.block_name} value={b.block_name}>{b.block_name}</option>
+                        ))
+                      )}
+                    </select>
+                    {formErrors.block_section && <div className="text-rose-600 text-sm mt-1">{formErrors.block_section}</div>}
+                  </div>
                 </div>
               </div>
 
@@ -895,57 +1150,24 @@ const StudentsManagement = () => {
         </div>
       )}
 
-      {/* Archived Students Modal */}
-      {isArchiveOpen && (
-        <div className="fixed inset-0 z-[10000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setIsArchiveOpen(false)}>
-          <div className="bg-white w-full max-w-3xl rounded-2xl shadow-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-black text-slate-800">Archived Students</h3>
-                <p className="text-sm text-slate-400">Students that were archived</p>
-              </div>
-              <button className="text-slate-400 hover:text-slate-700 text-2xl" onClick={() => setIsArchiveOpen(false)}>&times;</button>
+      {studentToArchive && (
+        <div className="fixed inset-0 z-[10000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setStudentToArchive(null)}>
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-100">
+              <h3 className="text-lg font-black text-slate-800">Archive Student</h3>
+              <p className="text-sm text-slate-400 mt-1">This will move the student to the archived section.</p>
             </div>
-
-            <div className="p-6">
-              {isLoadingArchived && <div className="text-sm text-slate-500">Loading archived students...</div>}
-              {archiveError && <div className="text-sm text-rose-600">{archiveError}</div>}
-              {!isLoadingArchived && !archiveError && archivedStudents.length === 0 && (
-                <div className="text-sm text-slate-500">No archived students found.</div>
-              )}
-
-              {!isLoadingArchived && archivedStudents.length > 0 && (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
-                    <thead className="bg-slate-50 border-b border-slate-100">
-                      <tr>
-                        <th className="px-4 py-3 text-sm text-slate-500">Student ID</th>
-                        <th className="px-4 py-3 text-sm text-slate-500">Name</th>
-                        <th className="px-4 py-3 text-sm text-slate-500">Program</th>
-                        <th className="px-4 py-3 text-sm text-slate-500 text-center">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {archivedStudents.map((s, i) => (
-                        <tr key={s.pk || i} className="hover:bg-slate-50/80">
-                          <td className="px-4 py-3 text-xs font-mono text-slate-500">{s.id}</td>
-                          <td className="px-4 py-3 text-sm font-black text-slate-800">{s.name}</td>
-                          <td className="px-4 py-3 text-sm text-slate-600">{s.program}</td>
-                          <td className="px-4 py-3 text-center">
-                            <div className="flex items-center justify-center gap-2">
-                              <button onClick={() => { setIsArchiveOpen(false); showStudentDetails(s.pk); }} className="px-3 py-1 bg-slate-100 rounded-lg text-sm font-semibold">View</button>
-                              <button onClick={() => restoreStudent(s.pk)} className="px-3 py-1 bg-emerald-50 text-emerald-600 border border-emerald-100 rounded-lg text-sm font-semibold">Restore</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              <div className="flex justify-end mt-4">
-                <button className="px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm" onClick={() => setIsArchiveOpen(false)}>Close</button>
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-slate-700">
+                Are you sure you want to archive <span className="font-bold text-slate-900">{studentToArchive.name}</span>?
+              </p>
+              <div className="flex items-center justify-end gap-3">
+                <button type="button" className="px-4 py-2 text-sm font-bold text-slate-500" onClick={() => setStudentToArchive(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="px-4 py-2 text-sm font-bold bg-rose-600 text-white rounded-lg hover:bg-rose-700" onClick={() => archiveStudent(studentToArchive)}>
+                  Archive
+                </button>
               </div>
             </div>
           </div>
@@ -984,7 +1206,7 @@ const StudentsManagement = () => {
       {isBulkImportOpen && (
         <div className="fixed inset-0 z-[9999] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setIsBulkImportOpen(false)}>
           <div
-            className="bg-white w-full max-w-2xl rounded-2xl shadow-xl overflow-hidden"
+            className="bg-white w-full max-w-2xl rounded-2xl shadow-xl overflow-hidden max-h-[90vh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
@@ -997,32 +1219,46 @@ const StudentsManagement = () => {
               </button>
             </div>
 
-            <div className="p-6 space-y-4">
+            <div className="p-6 space-y-4 overflow-y-auto">
               <div className="border-2 border-dashed border-slate-300 rounded-lg p-8 text-center">
                 <div className="text-4xl mb-4">📁</div>
                 <h4 className="text-lg font-semibold text-slate-700 mb-2">Upload CSV File</h4>
                 <p className="text-sm text-slate-500 mb-4">
-                  Select a CSV file containing student data. Required columns: email, firstname, lastname, student_id
+                  Select a CSV file containing student data.<br/>
+                  <strong>Required:</strong> email, firstname, lastname, student_id<br/>
+                  <strong>Recommended:</strong> birthdate (for password generation), department, year_level
                 </p>
-                <input
-                  type="file"
-                  accept=".csv"
-                  onChange={(e) => {
-                    const file = e.target.files[0];
-                    if (file) {
+                <div className="flex items-center justify-center gap-3">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      const err = validateCsvFile(file);
+                      if (err) {
+                        setBulkImportResult({ success: false, message: err, errors: [] });
+                        e.target.value = '';
+                        return;
+                      }
                       handleBulkImport(file);
-                    }
-                  }}
-                  className="hidden"
-                  id="csv-upload"
-                  disabled={isBulkImporting}
-                />
-                <label
-                  htmlFor="csv-upload"
-                  className="inline-flex items-center px-4 py-2 bg-[#1f474d] text-white rounded-lg text-sm font-bold hover:bg-[#18393e] cursor-pointer disabled:opacity-70"
-                >
-                  {isBulkImporting ? 'Importing...' : 'Choose CSV File'}
-                </label>
+                    }}
+                    className="hidden"
+                    id="csv-upload"
+                    disabled={isBulkImporting}
+                  />
+                  <label
+                    htmlFor="csv-upload"
+                    className="inline-flex items-center px-4 py-2 bg-[#1f474d] text-white rounded-lg text-sm font-bold hover:bg-[#18393e] cursor-pointer disabled:opacity-70"
+                  >
+                    {isBulkImporting ? 'Importing...' : 'Choose CSV File'}
+                  </label>
+                  <button
+                    onClick={downloadCSVTemplate}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700"
+                  >
+                    <Download size={16} /> Download Template
+                  </button>
+                </div>
               </div>
 
               {/* CSV Format Guide */}
@@ -1030,10 +1266,30 @@ const StudentsManagement = () => {
                 <h5 className="font-semibold text-slate-700 mb-2">CSV Format Requirements:</h5>
                 <div className="text-sm text-slate-600 space-y-1">
                   <div><strong>Required columns:</strong> email, firstname, lastname, student_id</div>
-                  <div><strong>Optional columns:</strong> department, year_level, course, enrolled_subjects, block_section</div>
-                  <div><strong>Notes:</strong> For enrolled_subjects, use JSON format like <code>{`[{'code': 'COMP101', 'description': 'Programming Fundamentals'}, ...]`}</code></div>
-                  <div><strong>Example:</strong> email,firstname,lastname,student_id,department,year_level,enrolled_subjects,block_section</div>
-                  <div><strong>Sample row:</strong> john.doe@upang.edu.ph,John,,Doe,2021-0001,Computer Science,3,{`[{'code': 'COMP101', 'description': 'Programming Fundamentals'}]`},A1</div>
+                  <div><strong>Optional columns:</strong> department, year_level, course, enrolled_subjects, block_section, middlename, birthdate</div>
+                  <div className="mt-3 p-3 bg-white rounded border border-slate-200">
+                    <div className="font-mono text-xs">
+                      <div className="font-semibold mb-1">Sample CSV:</div>
+                      <div className="overflow-x-auto">
+                        <div>email,firstname,middlename,lastname,student_id,department,year_level,course,block_section,birthdate,enrolled_subjects</div>
+                        <div>john.doe@upang.edu.ph,John,M,Doe,2021-0001,CITE,1,BSIT,A1,2000-05-15,"ITE293|Systems Admin|J. Cruz;CS101|Programming|J. Smith"</div>
+                        <div>jane.smith@upang.edu.ph,Jane,L,Smith,2021-0002,CITE,2,BSCS,B2,1999-08-22,"MATH201|Calculus|M. Garcia;PHYS202|Physics|R. Lee"</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-500 space-y-1">
+                    <div><strong>Notes:</strong></div>
+                    <ul className="list-disc list-inside space-y-1">
+                      <li><strong>Birthdate format:</strong> YYYY-MM-DD (e.g., 2000-05-15). Used to auto-generate password.</li>
+                      <li><strong>Enrolled subjects format:</strong> Use <strong>CODE|Description|Instructor</strong> for each subject</li>
+                      <li>Separate multiple subjects with semicolons <strong>;</strong></li>
+                      <li><strong>Example:</strong> "ITE293|Systems Admin|J. Cruz;CS101|Programming|J. Smith"</li>
+                      <li><strong>Simple format also works:</strong> Just codes like "CS101;IT102" (description & instructor will be empty)</li>
+                      <li><strong>Password generation:</strong> Auto-generated from name + birthdate (first 2 letters of each name + month + year)</li>
+                      <li>Put enrolled_subjects in quotes if it contains commas or semicolons</li>
+                      <li>Column names are case-sensitive</li>
+                    </ul>
+                  </div>
                 </div>
               </div>
 
@@ -1071,18 +1327,6 @@ const StudentsManagement = () => {
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  className="px-4 py-2 text-sm font-bold text-slate-500"
-                  onClick={() => {
-                    setIsBulkImportOpen(false);
-                    setBulkImportResult(null);
-                  }}
-                >
-                  Close
-                </button>
-              </div>
             </div>
           </div>
         </div>

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import Header from './components/Header.jsx';
 import IdleManager from './components/IdleManager.jsx';
 import SplashScreen from './components/SplashScreen.jsx';
+import { getToken, getUser } from './utils/auth';
 
 // Main Pages
 import LandingPage from './pages/LandingPage.jsx';
@@ -12,21 +13,31 @@ import ContactPage from './pages/ContactPage.jsx';
 import DeptHeadDashboard from './pages/depthead/DeptHeadDashboard.jsx';
 import AuditLogPage from './pages/depthead/AuditLogPage.jsx';
 import FacultyPages from './pages/depthead/FacultyPages.jsx';
-import Forms from './pages/depthead/Forms.jsx';
 import ReportsPage from './pages/depthead/ReportsPage.jsx';
 import StudentsPage from './pages/depthead/StudentsPage.jsx';
+import CoursesPage from './pages/depthead/CoursesPage.jsx';
+import BlockSectionsPage from './pages/depthead/BlockSectionsPage.jsx';
 
 // Faculty Pages
 import FacultyDashboard from './pages/faculty/FacultyDashboard.jsx';
+import FacultyClassroomPage from './pages/faculty/ClassroomPage.jsx';
+import FacultyEnrollmentsPage from './pages/faculty/EnrollmentsPage.jsx';
+import FacultyClassroomStudentsPage from './pages/faculty/ClassroomStudentsPage.jsx';
+import FacultyFormsPage from './pages/faculty/Forms.jsx';
+import FacultyAuditLogPage from './pages/faculty/AuditLogPage.jsx';
 
 // Student Pages
 import StudentDashboard from './pages/student/StudentDashboard.jsx';
 import HistoryPage from './pages/student/HistoryPage.jsx';
-import InstructorsPage from './pages/student/InstructorsPage.jsx';
+import ClassroomPage from './pages/student/ClassroomPage.jsx';
+import StudentClassroomStudentsPage from './pages/student/ClassroomStudentsPage.jsx';
 import ModulePage from './pages/student/ModulePage.jsx';
 import EvaluationForm from './pages/student/EvaluationForm.jsx';
+import EvaluationPage from './pages/student/EvaluationPage.jsx';
+import StudentAuditLogPage from './pages/student/AuditLogPage.jsx';
 
 function App() {
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
   const [route, setRoute] = useState(window.location.pathname || '/');
   const [showSplash, setShowSplash] = useState(false);
   // On startup: if a persistent token exists in localStorage (from older flows),
@@ -52,6 +63,10 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/auth/csrf/`, { credentials: 'include' }).catch(() => {});
+  }, [API_BASE_URL]);
+
   // Show a brief splash screen on full page reloads
   useEffect(() => {
     try {
@@ -60,17 +75,47 @@ function App() {
       // navigation.type === 1 indicates reload in legacy API
       const isReload = navType === 'reload' || navType === 1;
       if (isReload) {
-        setShowSplash(true);
-        const t = setTimeout(() => setShowSplash(false), 900);
-        return () => clearTimeout(t);
+        const showTimer = setTimeout(() => setShowSplash(true), 0);
+        const hideTimer = setTimeout(() => setShowSplash(false), 900);
+        return () => {
+          clearTimeout(showTimer);
+          clearTimeout(hideTimer);
+        };
       }
-    } catch (e) {
+    } catch {
       // ignore
     }
   }, []);
 
   // Accept token from sessionStorage (preferred) or localStorage (fallback for older flows)
-  const isLoggedIn = Boolean(sessionStorage.getItem('authToken') || localStorage.getItem('authToken'));
+  const isLoggedIn = Boolean(getToken());
+  // Resolve user role from stored user info (used to restrict routes)
+  const getResolvedRole = () => {
+    let storedUser = null;
+    try {
+      const raw = sessionStorage.getItem('authUser') || localStorage.getItem('authUser') || null;
+      storedUser = raw ? JSON.parse(raw) : getUser();
+    } catch {
+      storedUser = getUser();
+    }
+
+    const roleMap = {
+      student: 'Student',
+      faculty: 'Faculty',
+      department_head: 'Department Head',
+    };
+    return roleMap[storedUser?.user_type] || null;
+  };
+
+  const resolvedRole = getResolvedRole();
+
+  const isRouteAllowedForRole = (role, path) => {
+    if (!role) return false;
+    if (role === 'Student') return path === '/dashboard' || path.startsWith('/dashboard/');
+    if (role === 'Faculty') return path === '/faculty-dashboard' || path.startsWith('/faculty-dashboard/');
+    if (role === 'Department Head') return path === '/depthead-dashboard' || path.startsWith('/depthead-dashboard/');
+    return false;
+  };
 
   useEffect(() => {
     const onPop = () => setRoute(window.location.pathname || '/');
@@ -78,17 +123,39 @@ function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
+  useEffect(() => {
+    const isProtected =
+      route.startsWith('/dashboard') ||
+      route.startsWith('/depthead-dashboard') ||
+      route.startsWith('/faculty-dashboard');
+
+    if (!isLoggedIn && isProtected) {
+      window.history.replaceState({}, '', '/');
+      setTimeout(() => setRoute('/'), 0);
+      return;
+    }
+
+    // If logged in but trying to access a route not allowed for the role,
+    // redirect to the role's home.
+    if (isLoggedIn && !isRouteAllowedForRole(resolvedRole, route)) {
+      const homePathMap = {
+        Student: '/dashboard',
+        Faculty: '/faculty-dashboard',
+        'Department Head': '/depthead-dashboard',
+      };
+      const target = homePathMap[resolvedRole] || '/dashboard';
+      if (route !== target) {
+        window.history.replaceState({}, '', target);
+        setTimeout(() => setRoute(target), 0);
+      }
+    }
+  }, [isLoggedIn, route, resolvedRole]);
+
   // If user is logged in, prevent landing page access via URL editing
   useEffect(() => {
     if (!isLoggedIn) return;
     if (route === '/' || route === '' || route === '/home') {
-      let storedUser = null;
-      try {
-        const raw = sessionStorage.getItem('authUser') || localStorage.getItem('authUser') || 'null'
-        storedUser = JSON.parse(raw);
-      } catch {
-        storedUser = null;
-      }
+      const storedUser = getUser();
 
       const roleMap = {
         student: 'Student',
@@ -105,9 +172,10 @@ function App() {
       const target = homePathMap[resolvedRole] || '/dashboard';
       if (route !== target) {
         window.history.replaceState({}, '', target);
+        setTimeout(() => setRoute(target), 0);
       }
     }
-  }, [isLoggedIn]);
+  }, [isLoggedIn, route]);
 
   // Routing Logic
   const renderContent = () => {
@@ -137,33 +205,56 @@ function App() {
     if (route === '/about') return <About />;
     if (route === '/contact') return <ContactPage />;
 
-    // Dept Head Nested Routes
+    // Dept Head Nested Routes (enforce role in render as a fallback)
     if (route.startsWith('/depthead-dashboard')) {
+      if (resolvedRole !== 'Department Head') {
+        // If a non-dept-head somehow reached this render path, show their dashboard
+        if (resolvedRole === 'Faculty') return <FacultyDashboard />;
+        return <StudentDashboard />;
+      }
+
       if (route === '/depthead-dashboard/audit-log') return <AuditLogPage />;
       if (route === '/depthead-dashboard/faculty') return <FacultyPages />;
-      if (route === '/depthead-dashboard/forms') return <Forms />;
       if (route === '/depthead-dashboard/reports') return <ReportsPage />;
       if (route === '/depthead-dashboard/students') return <StudentsPage />;
+      if (route === '/depthead-dashboard/courses') return <CoursesPage />;
+      if (route === '/depthead-dashboard/block-sections') return <BlockSectionsPage />;
       return <DeptHeadDashboard />;
     }
 
-    // Faculty Routes
-    if (route === '/faculty-dashboard') return <FacultyDashboard />;
+    // Faculty Routes (enforce role)
+    if (route.startsWith('/faculty-dashboard')) {
+      if (resolvedRole !== 'Faculty') {
+        if (resolvedRole === 'Department Head') return <DeptHeadDashboard />;
+        return <StudentDashboard />;
+      }
+
+      if (route.startsWith('/faculty-dashboard/classroom/students')) return <FacultyClassroomStudentsPage />;
+      if (route === '/faculty-dashboard/classroom') return <FacultyClassroomPage />;
+      if (route === '/faculty-dashboard/enrollments') return <FacultyEnrollmentsPage />;
+      if (route === '/faculty-dashboard/forms') return <FacultyFormsPage />;
+      if (route === '/faculty-dashboard/audit-log') return <FacultyAuditLogPage />;
+      return <FacultyDashboard />;
+    }
 
     // Student Nested Routes
     if (route.startsWith('/dashboard')) {
+      if (route.startsWith('/dashboard/classroom/students')) return <StudentClassroomStudentsPage />;
+      if (route === '/dashboard/classroom') return <ClassroomPage />;
       if (route === '/dashboard/history') return <HistoryPage />;
-      if (route === '/dashboard/instructors') return <InstructorsPage />;
+      if (route === '/dashboard/audit-log') return <StudentAuditLogPage />;
+      // New unified evaluation page with tabs
+      if (route.startsWith('/dashboard/evaluation')) return <EvaluationPage />;
+      // Backwards-compatible route: direct modules page still works.
       if (route === '/dashboard/modules') return <ModulePage />;
-      if (route.startsWith('/dashboard/evaluate-instructor/')) {
-        const instructorFormId = route.split('/')[3];
-        return <EvaluationForm instructorFormId={instructorFormId} />;
-      }
+      // Legacy instructor-only URL now points to unified module-based evaluations.
+      if (route.startsWith('/dashboard/evaluate-instructor/')) return <EvaluationPage />;
         
       if (route.startsWith('/dashboard/evaluate/')) {
-        const moduleId = route.split('/')[3];
-        return <EvaluationForm moduleId={moduleId} />;
-      }
+        const moduleId = route.split('/')[3];               // ← <–– add this
+        const { formId } = window.history.state || {};
+        return <EvaluationForm moduleId={moduleId} evalFormId={formId} />;
+     }
       
       return <StudentDashboard />;
     }

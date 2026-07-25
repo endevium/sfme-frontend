@@ -1,20 +1,66 @@
 /* src/index.css */
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Optima";
+  src: local("Optima"), local("Optima Regular"), local("OptimaLTStd");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Optima-Medium";
+  src: local("Optima Medium"), local("Optima-Medium"), local("OptimaLTStd-Medium");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
 :root {
   --up-dark-blue: #102a43;   /* Deep background blue */
   --up-gold: #fbbf24;        /* Golden yellow for highlights */
   --up-teal: #244e59;        /* Teal gradient/accent */
   --white: #ffffff;
+  --up-ui-font: "Optima-Medium", "Optima", "Candara", "Segoe UI", Tahoma, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
   margin: 0;
-  font-family: 'Optima-Medium', 'Optima', 'Candara', 'Segoe UI', sans-serif; /* A clean font similar to your design */
+  font-family: var(--up-ui-font);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   /* Use a page-neutral background to avoid thin seam lines showing through
      (matches Tailwind's bg-slate-50 used in page containers) */
   background-color: #f8fafc;
   color: #0f172a;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* Many pages use Tailwind arbitrary Optima classes.
+   Force a single reliable stack so text metrics stay consistent across browsers. */
+[class*="font-['Optima-Medium'"],
+[class*="font-[\'Optima-Medium\'"],
+[style*="Optima-Medium"],
+[style*="Optima"],
+[style*="Candara"] {
+  font-family: var(--up-ui-font) !important;
 }
 
 .grecaptcha-badge {

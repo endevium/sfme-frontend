@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import Navbar from '../components/Navbar';
 import Footer from '../components/Footer';
 import { 
@@ -6,38 +6,31 @@ import {
   Phone, 
   MapPin, 
   Clock, 
-  Send, 
   ArrowRight 
 } from "lucide-react";
 
 const ContactPage = () => {
-  const [form, setForm] = useState({ name: '', email: '', subject: '', message: '' });
-  const [submitted, setSubmitted] = useState(false);
-
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setForm((s) => ({ ...s, [name]: value }));
+  const tokenBg = {
+    background: 'linear-gradient(180deg, color-mix(in srgb, var(--up-dark-blue) 88%, black 12%) 0%, #0f2132 100%)',
   };
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!form.name || !form.email || !form.message) return;
-    setSubmitted(true);
-    // Simulate submission
-    setTimeout(() => setForm({ name: '', email: '', subject: '', message: '' }), 300);
+  const tokenPanel = {
+    backgroundColor: 'color-mix(in srgb, var(--up-dark-blue) 82%, black 18%)',
+  };
+
+  const iconBadge = {
+    backgroundColor: 'color-mix(in srgb, var(--up-teal) 38%, transparent 62%)',
   };
 
   return (
-    <div className="min-h-screen w-full font-['Optima-Medium','Optima','Candara','sans-serif'] text-white bg-gradient-to-b from-[#08121b] to-[#102033]">
+    <div className="min-h-screen w-full font-['Optima-Medium','Optima','Candara','sans-serif'] text-white" style={tokenBg}>
       <Navbar />
 
       <main className="container mx-auto px-6 py-16 max-w-6xl">
         {/* Hero Section */}
         <header className="mb-12 text-center">
-          <div className="inline-block mb-4 px-4 py-1 bg-white/10 text-[#ffcc00] rounded-full text-sm font-medium border border-[#ffcc00]/20">
-            Get In Touch
-          </div>
-          <h1 className="text-4xl md:text-5xl font-bold text-[#ffcc00] mb-4">
+          
+          <h1 className="text-4xl md:text-5xl font-bold text-[var(--up-gold)] mb-4">
             We're Here to <span className="text-white">Help</span>
           </h1>
           <p className="text-white/80 max-w-2xl mx-auto text-lg">
@@ -47,9 +40,9 @@ const ContactPage = () => {
 
         {/* Info Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-          <div className="bg-[#0f2434] p-6 rounded-xl border border-white/5 hover:border-[#ffcc00]/30 transition-all">
-            <div className="w-12 h-12 bg-blue-500/20 rounded-lg flex items-center justify-center mb-4">
-              <MapPin className="h-6 w-6 text-blue-400" />
+          <div className="p-6 rounded-xl border border-white/5 hover:border-[var(--up-gold)]/30 transition-all" style={tokenPanel}>
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center mb-4" style={iconBadge}>
+              <MapPin className="h-6 w-6 text-[var(--up-gold)]" />
             </div>
             <h3 className="font-bold text-white mb-2">Visit Us</h3>
             <p className="text-sm text-white/60 leading-relaxed">
@@ -59,9 +52,9 @@ const ContactPage = () => {
             </p>
           </div>
 
-          <div className="bg-[#0f2434] p-6 rounded-xl border border-white/5 hover:border-[#ffcc00]/30 transition-all">
-            <div className="w-12 h-12 bg-green-500/20 rounded-lg flex items-center justify-center mb-4">
-              <Mail className="h-6 w-6 text-green-400" />
+          <div className="p-6 rounded-xl border border-white/5 hover:border-[var(--up-gold)]/30 transition-all" style={tokenPanel}>
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center mb-4" style={iconBadge}>
+              <Mail className="h-6 w-6 text-[var(--up-gold)]" />
             </div>
             <h3 className="font-bold text-white mb-2">Email Us</h3>
             <p className="text-sm text-white/60 leading-relaxed">
@@ -71,9 +64,9 @@ const ContactPage = () => {
             </p>
           </div>
 
-          <div className="bg-[#0f2434] p-6 rounded-xl border border-white/5 hover:border-[#ffcc00]/30 transition-all">
-            <div className="w-12 h-12 bg-purple-500/20 rounded-lg flex items-center justify-center mb-4">
-              <Phone className="h-6 w-6 text-purple-400" />
+          <div className="p-6 rounded-xl border border-white/5 hover:border-[var(--up-gold)]/30 transition-all" style={tokenPanel}>
+            <div className="w-12 h-12 rounded-lg flex items-center justify-center mb-4" style={iconBadge}>
+              <Phone className="h-6 w-6 text-[var(--up-gold)]" />
             </div>
             <h3 className="font-bold text-white mb-2">Call Us</h3>
             <p className="text-sm text-white/60 leading-relaxed">
@@ -84,88 +77,13 @@ const ContactPage = () => {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
-          {/* Contact Form */}
-          <section className="bg-[#0f2434] rounded-xl p-8 border border-white/5">
-            <h2 className="text-2xl font-bold mb-2">Send Us a Message</h2>
-            <p className="text-white/60 mb-6 text-sm">Fill out the form below and we'll get back to you as soon as possible.</p>
-            
-            {submitted ? (
-              <div className="text-center py-12 bg-white/5 rounded-lg border border-dashed border-white/10">
-                <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <Send className="h-8 w-8 text-green-400" />
-                </div>
-                <h3 className="text-xl font-semibold text-white mb-2">Message Sent!</h3>
-                <p className="text-white/60">We'll respond to your inquiry within 24-48 hours.</p>
-                <button onClick={() => setSubmitted(false)} className="mt-6 text-[#ffcc00] underline text-sm">Send another message</button>
-              </div>
-            ) : (
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label className="block mb-2 text-sm text-white/70">Full Name *</label>
-                        <input
-                            name="name"
-                            placeholder="Juan Dela Cruz"
-                            value={form.name}
-                            onChange={handleChange}
-                            className="w-full rounded-md bg-white/5 border border-white/10 px-4 py-2 text-white focus:border-[#ffcc00]/50 outline-none transition-all"
-                            required
-                        />
-                    </div>
-                    <div>
-                        <label className="block mb-2 text-sm text-white/70">Email Address *</label>
-                        <input
-                            name="email"
-                            type="email"
-                            placeholder="juan@upang.edu.ph"
-                            value={form.email}
-                            onChange={handleChange}
-                            className="w-full rounded-md bg-white/5 border border-white/10 px-4 py-2 text-white focus:border-[#ffcc00]/50 outline-none transition-all"
-                            required
-                        />
-                    </div>
-                </div>
-
-                <div>
-                  <label className="block mb-2 text-sm text-white/70">Subject *</label>
-                  <input
-                    name="subject"
-                    placeholder="How can we help you?"
-                    value={form.subject}
-                    onChange={handleChange}
-                    className="w-full rounded-md bg-white/5 border border-white/10 px-4 py-2 text-white focus:border-[#ffcc00]/50 outline-none transition-all"
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label className="block mb-2 text-sm text-white/70">Message *</label>
-                  <textarea
-                    name="message"
-                    value={form.message}
-                    onChange={handleChange}
-                    rows={5}
-                    placeholder="Please describe your inquiry in detail..."
-                    className="w-full rounded-md bg-white/5 border border-white/10 px-4 py-2 text-white focus:border-[#ffcc00]/50 outline-none resize-none transition-all"
-                    required
-                  />
-                </div>
-
-                <button type="submit" className="w-full bg-[#ffcc00] hover:bg-[#e6b800] text-[#041c32] font-bold py-3 rounded-md transition-colors flex items-center justify-center gap-2">
-                  <Send className="h-4 w-4" />
-                  Send Message
-                </button>
-              </form>
-            )}
-          </section>
-
+        <div className="max-w-3xl mx-auto space-y-6">
           {/* Sidebar Info */}
           <div className="space-y-6">
             {/* Office Hours */}
-            <div className="bg-[#0f2434] rounded-xl p-6 border border-white/5">
+            <div className="rounded-xl p-6 border border-white/5" style={tokenPanel}>
               <div className="flex items-center gap-3 mb-4">
-                <Clock className="h-5 w-5 text-[#ffcc00]" />
+                <Clock className="h-5 w-5 text-[var(--up-gold)]" />
                 <h3 className="font-bold text-white">Office Hours</h3>
               </div>
               <div className="space-y-3 text-sm">
@@ -185,11 +103,11 @@ const ContactPage = () => {
             </div>
 
             {/* Campus Location */}
-            <div className="bg-[#0f2434] rounded-xl p-6 border border-white/5">
+            <div className="rounded-xl p-6 border border-white/5" style={tokenPanel}>
               <h3 className="font-bold text-white mb-4">Campus Location</h3>
               <div className="space-y-3 text-sm text-white/70">
-                <p><strong className="text-[#ffcc00]">Building:</strong> Administrative Building</p>
-                <p><strong className="text-[#ffcc00]">Floor:</strong> 2nd Floor, Room 205</p>
+                <p><strong className="text-[var(--up-gold)]">Building:</strong> Administrative Building</p>
+                <p><strong className="text-[var(--up-gold)]">Floor:</strong> 2nd Floor, Room 205</p>
                 <p className="text-xs leading-relaxed italic">
                   Note: If you're coming from the main gate, walk straight past the fountain, turn left at the library, and you'll find the Administrative Building.
                 </p>
@@ -197,14 +115,14 @@ const ContactPage = () => {
             </div>
 
             {/* FAQ Brief */}
-            <div className="bg-[#0f2434] rounded-xl p-6 border border-white/5">
+            <div className="rounded-xl p-6 border border-white/5" style={tokenPanel}>
               <h3 className="font-bold text-white mb-3">Quick FAQ</h3>
               <p className="text-xs text-white/60 mb-3">
                 <strong>Response Time:</strong> Typically 24-48 hours.
               </p>
               <button 
                 onClick={() => window.location.href = '/about'}
-                className="text-sm text-[#ffcc00] flex items-center gap-1 hover:underline"
+                className="text-sm text-[var(--up-gold)] flex items-center gap-1 hover:underline"
               >
                 Learn more about us <ArrowRight className="h-3 w-3" />
               </button>
@@ -213,7 +131,7 @@ const ContactPage = () => {
         </div>
         {/* Map Section */}
         <section className="mt-12">
-          <div className="bg-[#0f2434] rounded-xl p-4 border border-white/5 shadow-2xl">
+          <div className="rounded-xl p-4 border border-white/5 shadow-2xl" style={tokenPanel}>
             <div className="text-center mb-6 pt-4">
               <h2 className="text-2xl font-bold text-white mb-2">Find Us on Campus</h2>
               <p className="text-white/60 text-sm">Administrative Building, University of Pangasinan</p>
@@ -234,12 +152,12 @@ const ContactPage = () => {
               ></iframe>
               
               {/* Dark Overlay for better blending */}
-              <div className="absolute inset-0 pointer-events-none border-[12px] border-[#0f2434] rounded-lg"></div>
+              <div className="absolute inset-0 pointer-events-none border-[12px] rounded-lg border-[var(--up-dark-blue)]"></div>
             </div>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6 px-4 pb-4">
               <div className="flex items-center gap-3 text-sm text-white/70">
-                <MapPin className="h-4 w-4 text-[#ffcc00]" />
+                <MapPin className="h-4 w-4 text-[var(--up-gold)]" />
                 <span>Arellano Street, Dagupan City, Pangasinan</span>
               </div>
               <div className="flex items-center gap-3 text-sm text-white/70 md:justify-end">
